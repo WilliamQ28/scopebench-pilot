@@ -53,6 +53,7 @@ def test_run_verifier_container_success(monkeypatch: pytest.MonkeyPatch, tmp_pat
     def fake(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         seen["cmd"] = cmd
         seen["input"] = kwargs.get("input")
+        seen["stdin"] = kwargs.get("stdin")
         return subprocess.CompletedProcess(cmd, 0, "PASS", "")
 
     monkeypatch.setattr(subprocess, "run", fake)
@@ -68,7 +69,12 @@ def test_run_verifier_container_success(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert "netname" in cmd
     assert cmd[cmd.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
     assert "-e" in cmd  # the service-DNS env is injected
-    assert "exit 0" in str(seen["input"])  # the verifier source travels on stdin
+    # Regression: the verifier is mounted read-only and executed BY PATH, never piped on stdin
+    # (where a `python3 - <<'PY'` heredoc would eat the script stream and force a false pass).
+    assert f"{(tmp_path / 'v.sh').resolve()}:/verify.sh:ro" in cmd
+    assert cmd[-2:] == ["bash", "/verify.sh"]
+    assert seen["input"] is None
+    assert seen["stdin"] is subprocess.DEVNULL
 
 
 def test_run_verifier_container_timeout_force_removes(

@@ -17,7 +17,11 @@ from agent_harness import HarnessSettings
 SANDBOX_PROVIDERS: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
+    # Chat Completions API, used for self-hosted OpenAI-compatible servers (e.g. vLLM) via a custom
+    # base_url. Shares the OpenAI SDK/key already in the image; distinct from "openai" (Responses).
+    "openai-chat": "OPENAI_API_KEY",
     "google": "GOOGLE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
 
 _GEMINI_FALLBACK_ENV = "GEMINI_API_KEY"
@@ -82,6 +86,7 @@ def format_model_listing() -> str:
     lines.append(
         "Any 'provider:model' string for a provider above is accepted even if not\n"
         + "listed (the registry lags new releases). Other providers need their SDK\n"
-        + "added to the sandbox image first.",
+        + "added to the sandbox image first.\n"
+        + "OpenRouter uses dynamic IDs, e.g. openrouter:anthropic/claude-sonnet-4.5.",
     )
     return "\n".join(lines)

@@ -34,6 +34,8 @@ def test_run_cmd_is_hardened() -> None:
         assert flag in cmd
     assert cmd[cmd.index("--network") + 1] == "netname"
     assert cmd[cmd.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
+    # The host-gateway mapping lets the sandboxed agent reach a tunnelled model endpoint.
+    assert cmd[cmd.index("--add-host") + 1] == "host.docker.internal:host-gateway"
     assert cmd[-1] == "img"
 
 

@@ -33,7 +33,6 @@ from scopejudge.capability import ScopeJudge
 from scopejudge.protocol import AgentConfig, AgentResult, ToolCall
 
 if TYPE_CHECKING:
-    from pydantic_ai.capabilities import AgentCapability
     from pydantic_ai.messages import ModelMessage
     from pydantic_ai.models import Model
 
@@ -61,10 +60,12 @@ def _build_model(cfg: AgentConfig) -> Model:
     from pydantic_ai.providers import infer_provider_class  # noqa: PLC0415
 
     raw = cfg["model"] or HarnessSettings().model
+    base_url = cfg.get("base_url")
+    extra: dict[str, str] = {"base_url": base_url} if base_url else {}
     return infer_model(
         raw,
         provider_factory=lambda provider: infer_provider_class(provider)(
-            api_key=cfg["api_key"]  # pyright: ignore[reportCallIssue]
+            api_key=cfg["api_key"], **extra  # pyright: ignore[reportCallIssue]
         ),
     )
 
@@ -113,11 +114,39 @@ def _write_trajectory(
         )
 
 
-def _capabilities(cfg: AgentConfig) -> tuple[AgentCapability[HarnessDeps], ...]:
-    """Build the experimental treatment while leaving baseline runs unchanged."""
+def _capabilities(cfg: AgentConfig) -> tuple[ScopeJudge, ...]:
+    """Build the experimental treatment while leaving baseline runs unchanged.
+
+    The judge is deliberately constructed from ``cfg["instruction"]`` alone: an adversarial
+    ``attacker_brief`` steers only the acting agent (see :func:`_actor_prompt`) and must never
+    enter the judge's authorization policy, so the filter stays unaltered across conditions.
+    """
     if not cfg["scopejudge_enabled"]:
         return ()
-    return (ScopeJudge(),)
+    return (
+        ScopeJudge(
+            instruction=cfg["instruction"],
+            model=_build_model(cfg),
+            timeout=cfg.get("judge_timeout") or 30.0,
+            feedback=cfg.get("deny_feedback") or "reasoned",
+            attacker_brief=cfg.get("attacker_brief"),
+            hide_brief=cfg.get("hide_brief_from_judge", False),
+        ),
+    )
+
+
+def _actor_prompt(cfg: AgentConfig) -> str:
+    """Compose the acting agent's prompt from the optional attacker brief and the instruction.
+
+    The brief frames the mission and precedes the engagement text. It is the attacker-only channel
+    for the adversarial experiment; baseline runs (no brief) get exactly the engagement instruction,
+    unchanged. The judge never receives this composed prompt as its policy (see
+    :func:`_capabilities`).
+    """
+    brief = cfg.get("attacker_brief")
+    if not brief:
+        return cfg["instruction"]
+    return f"{brief}\n\n{cfg['instruction']}"
 
 
 async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _RunOutcome:
@@ -125,12 +154,13 @@ async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _Ru
     usage_limits = UsageLimits(request_limit=cfg["request_limit"])
     reply = cfg["ask_user_reply"]
     capabilities = _capabilities(cfg)
+    prompt = _actor_prompt(cfg)
     messages: list[ModelMessage] = []
     try:
         try:
             with capture_run_messages() as messages:
                 run = await agent.run(
-                    cfg["instruction"],
+                    prompt,
                     deps=deps,
                     usage_limits=usage_limits,
                     model=model,
@@ -158,6 +188,11 @@ async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _Ru
                 )
         return _RunOutcome(output=str(run.output), tool_calls=_tool_calls(run.all_messages()))
     finally:
+        for capability in capabilities:
+            _ = (deps.cwd / "scopejudge-decisions.json").write_text(
+                "[" + ",".join(record.model_dump_json() for record in capability.records) + "]",
+                encoding="utf-8",
+            )
         if cfg["atif"]:
             _write_trajectory(
                 messages,

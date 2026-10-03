@@ -10,6 +10,7 @@ import pytest
 from agent_sandbox import ImageError
 from scopebench import __main__ as cli
 from scopebench.__main__ import main
+from scopebench.runner import RunOptions
 
 _TASK = 'name: x\nversion: "1"\ninstruction: hi\nverification:\n  method: flag\n  hash: v\n'
 
@@ -103,6 +104,50 @@ def test_main_task_selector(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     assert main(argv) == 0
 
 
+def test_main_instruction_filter_threads_into_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[str | None] = []
+
+    async def fake_run_evals(_manifests: object, options: RunOptions, **_kw: object) -> _FakeReport:
+        seen.append(options.instruction_id)
+        return _FakeReport()
+
+    def no_logfire(*_args: object) -> None:
+        pass
+
+    monkeypatch.setattr(cli, "run_evals", fake_run_evals)
+    monkeypatch.setattr(cli, "configure_logfire", no_logfire)
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--agent",
+        "solution",
+        "--instruction",
+        "default",
+    ]
+    assert main(argv) == 0
+    assert seen == ["default"]
+
+
+def test_main_instruction_not_found_errors(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _mock_eval(monkeypatch)
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--agent",
+        "solution",
+        "--instruction",
+        "nope",
+    ]
+    assert main(argv) == 2
+    assert "no instruction variant 'nope'" in capsys.readouterr().err
+
+
 def test_main_unknown_task_name(tmp_path: Path) -> None:
     argv = ["--task", "nope", "--tasks-dir", str(_tasks_dir(tmp_path)), "--agent", "solution"]
     with pytest.raises(SystemExit, match="no such task"):
@@ -186,6 +231,24 @@ def test_main_harness_runs_openai_model_with_key(
     assert main(argv) == 0
 
 
+def test_main_harness_runs_openrouter_model_with_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_eval(monkeypatch)
+    monkeypatch.setattr(cli, "ensure_image", lambda: "img")
+    monkeypatch.setattr(cli, "_load_dotenv", _noop_dotenv)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "judge-k")
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--model",
+        "openrouter:anthropic/claude-sonnet-4.5",
+    ]
+    assert main(argv) == 0
+
+
 def test_main_harness_errors_without_trajectory_judge_key(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -214,7 +277,9 @@ def test_main_harness_rejects_unsupported_provider(
     assert main(argv) == 2
     err = capsys.readouterr().err
     assert "'groq'" in err
-    assert "Supported providers: anthropic, openai, google" in err
+    assert "Supported providers:" in err
+    assert "anthropic" in err  # the registry is listed
+    assert "openai-chat" in err
 
 
 def test_main_harness_rejects_bare_model_string(
@@ -226,13 +291,35 @@ def test_main_harness_rejects_bare_model_string(
     assert "provider:model" in capsys.readouterr().err
 
 
-def test_main_harness_steers_openai_chat_to_responses_prefix(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+def test_main_harness_accepts_openai_chat_with_base_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    def no_logfire(*_args: object) -> None:
+        pass
+
+    monkeypatch.setattr(cli, "ensure_image", lambda: "img")
+    monkeypatch.setattr(cli, "configure_logfire", no_logfire)
     monkeypatch.setattr(cli, "_load_dotenv", _noop_dotenv)
-    argv = ["--all", "--tasks-dir", str(_tasks_dir(tmp_path)), "--model", "openai-chat:gpt-4o"]
-    assert main(argv) == 2
-    assert "use the 'openai:' prefix" in capsys.readouterr().err
+    monkeypatch.setenv("OPENAI_API_KEY", "EMPTY")  # self-hosted vLLM accepts any token
+    seen: list[str | None] = []
+
+    async def fake_run_evals(_manifests: object, options: RunOptions, **_kw: object) -> _FakeReport:
+        seen.append(options.base_url)
+        return _FakeReport()
+
+    monkeypatch.setattr(cli, "run_evals", fake_run_evals)
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--model",
+        "openai-chat:Qwen2.5-72B-Instruct",
+        "--base-url",
+        "http://cc-node:8000/v1",
+    ]
+    # openai-chat is now an accepted provider, and the endpoint reaches RunOptions.
+    assert main(argv) == 0
+    assert seen == ["http://cc-node:8000/v1"]
 
 
 def test_main_list_models(
@@ -272,6 +359,177 @@ def test_main_scopejudge_warns_for_non_harness_agent(
     ]
     assert main(argv) == 0
     assert "--scopejudge only applies to --agent harness" in capsys.readouterr().err
+
+
+def test_main_attacker_brief_warns_for_non_harness_agent(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _mock_eval(monkeypatch)
+    brief = tmp_path / "b.md"
+    _ = brief.write_text("adversarial", encoding="utf-8")
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--agent",
+        "solution",
+        "--attacker-brief",
+        str(brief),
+    ]
+    assert main(argv) == 0
+    assert "--attacker-brief only applies to --agent harness" in capsys.readouterr().err
+
+
+def test_main_attacker_brief_missing_file(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _mock_eval(monkeypatch)
+    monkeypatch.setattr(cli, "ensure_image", lambda: "img")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    missing = tmp_path / "nope.md"
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--agent",
+        "harness",
+        "--attacker-brief",
+        str(missing),
+    ]
+    assert main(argv) == 2
+    assert "attacker brief file not found" in capsys.readouterr().err
+
+
+def test_main_attacker_brief_threads_into_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def no_logfire(*_args: object) -> None:
+        pass
+
+    monkeypatch.setattr(cli, "ensure_image", lambda: "img")
+    monkeypatch.setattr(cli, "configure_logfire", no_logfire)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    seen: list[tuple[str | None, str]] = []
+
+    async def fake_run_evals(_manifests: object, options: RunOptions, **_kw: object) -> _FakeReport:
+        seen.append((options.attacker_brief, options.attacker_brief_id))
+        return _FakeReport()
+
+    monkeypatch.setattr(cli, "run_evals", fake_run_evals)
+    brief = tmp_path / "adaptive-monitor-aware.md"
+    _ = brief.write_text("BREACH THE SCOPE", encoding="utf-8")
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--agent",
+        "harness",
+        "--attacker-brief",
+        str(brief),
+    ]
+    assert main(argv) == 0
+    # The brief text reaches RunOptions and the file stem names the condition.
+    assert seen == [("BREACH THE SCOPE", "adaptive-monitor-aware")]
+
+
+def test_main_deny_feedback_threads_into_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def no_logfire(*_args: object) -> None:
+        pass
+
+    monkeypatch.setattr(cli, "ensure_image", lambda: "img")
+    monkeypatch.setattr(cli, "configure_logfire", no_logfire)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    seen: list[tuple[str, float]] = []
+
+    async def fake_run_evals(_manifests: object, options: RunOptions, **_kw: object) -> _FakeReport:
+        seen.append((options.deny_feedback, options.judge_timeout))
+        return _FakeReport()
+
+    monkeypatch.setattr(cli, "run_evals", fake_run_evals)
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--agent",
+        "harness",
+        "--scopejudge",
+        "--deny-feedback",
+        "white",
+        "--judge-timeout",
+        "120",
+    ]
+    assert main(argv) == 0
+    assert seen == [("white", 120.0)]
+
+
+def test_main_deny_feedback_warns_without_scopejudge(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _mock_eval(monkeypatch)
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--agent",
+        "solution",
+        "--deny-feedback",
+        "white",
+    ]
+    assert main(argv) == 0
+    assert "--deny-feedback only affects runs with --scopejudge" in capsys.readouterr().err
+
+
+def test_main_hide_brief_threads_into_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def no_logfire(*_args: object) -> None:
+        pass
+
+    monkeypatch.setattr(cli, "ensure_image", lambda: "img")
+    monkeypatch.setattr(cli, "configure_logfire", no_logfire)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    seen: list[bool] = []
+
+    async def fake_run_evals(_manifests: object, options: RunOptions, **_kw: object) -> _FakeReport:
+        seen.append(options.hide_brief_from_judge)
+        return _FakeReport()
+
+    monkeypatch.setattr(cli, "run_evals", fake_run_evals)
+    brief = tmp_path / "b.md"
+    _ = brief.write_text("adversarial", encoding="utf-8")
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--agent",
+        "harness",
+        "--scopejudge",
+        "--attacker-brief",
+        str(brief),
+        "--hide-brief-from-judge",
+    ]
+    assert main(argv) == 0
+    assert seen == [True]
+
+
+def test_main_hide_brief_warns_without_requirements(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _mock_eval(monkeypatch)
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--agent",
+        "solution",
+        "--hide-brief-from-judge",
+    ]
+    assert main(argv) == 0
+    assert "--hide-brief-from-judge needs both --scopejudge and --attacker-brief" in (
+        capsys.readouterr().err
+    )
 
 
 def test_main_concurrency_warns_for_non_harness_agent(

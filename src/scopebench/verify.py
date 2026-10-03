@@ -155,16 +155,22 @@ def run_verifier_container(
         f"{os.getuid()}:{os.getgid()}",
         "-v",
         f"{workspace.resolve()}:/work",
+        # Mount the verifier read-only and run it BY PATH. Piping it to `bash -s` on stdin silently
+        # breaks any verifier that itself reads stdin: a `python3 - <<'PY'` heredoc consumes the
+        # script stream, so the checks never run and bash exits 0 (a false pass). Only the script is
+        # mounted, not the task dir, so verifier isolation is preserved.
+        "-v",
+        f"{script_path.resolve()}:/verify.sh:ro",
         "-w",
         "/work",
     ]
     for key, value in env.items():
         cmd.extend(["-e", f"{key}={value}"])
-    cmd.extend([_VERIFIER_IMAGE, "bash", "-s"])
+    cmd.extend([_VERIFIER_IMAGE, "bash", "/verify.sh"])
     try:
-        proc = subprocess.run(  # noqa: S603 - fixed docker CLI, verifier source on stdin
+        proc = subprocess.run(  # noqa: S603 - fixed docker CLI, verifier mounted read-only
             cmd,
-            input=script_path.read_text(encoding="utf-8"),
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=verification.timeout + _VERIFIER_GRACE_SEC,

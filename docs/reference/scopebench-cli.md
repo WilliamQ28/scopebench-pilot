@@ -32,7 +32,10 @@ Without `--list`, exactly one of `--task` or `--all` is required.
 
 The measured strategy requires its provider key. Scoped cases additionally require
 `ANTHROPIC_API_KEY` for the fixed trajectory judge. Use `--list-models` to inspect the identifiers
-accepted by this frozen runner.
+accepted by this runner. OpenRouter uses `OPENROUTER_API_KEY` and a model identifier such as
+`--model openrouter:anthropic/claude-sonnet-4.5`. Set the key in the local, git-ignored `.env`.
+To run with only an OpenRouter key, pass `--no-trajectory-judge`; the separate post-run judge
+otherwise still needs an Anthropic key. `--scopejudge` uses the selected acting-model provider.
 
 ## Repetition and output
 
@@ -45,10 +48,24 @@ accepted by this frozen runner.
 | `--[no-]trajectory-judge` | On | Enable the fixed scoped trajectory judge. |
 | `--workspace-root PATH` | `.scopebench-runs` | Parent directory for run workspaces. |
 | `--logfire` | Auto | Force Logfire configuration; otherwise a token enables it automatically. |
-| `--scopejudge` | Off | Enable the companion ScopeJudge treatment preserved in the runner. |
+| `--scopejudge` | Off | Enable pre-execution ScopeJudge blocking for harness tools. |
 
 `--scopejudge` is not part of the ScopeBench pilot result reproduction. It remains available
-because the frozen runner also supported the companion intervention experiment.
+as an opt-in intervention. Every validated function-tool call is judged before execution,
+including calls resumed after approval. A separate, tool-free judge uses the configured acting
+model and exact engagement instruction. Only an explicit `allow` executes the tool; denials,
+uncertainty, judge errors, and the 30-second per-call timeout return a blocked tool result.
+
+The run workspace contains `scopejudge-decisions.json`, recording each inspected call,
+its decision, and whether execution was allowed. Allowed calls can still fail or defer;
+this field records authorization, not successful execution. The post-run trajectory judge
+continues to grade the run independently. Gate judge requests have a separate three-request
+budget per call and consume the overall run time budget.
+
+This gate enforces its decisions at tool dispatch. Its model can misjudge indirect actions
+inside shell/Python code or redirects; it does not add network or filesystem isolation.
+Offline tests prove dispatch blocking with fake judges, file markers, and simulated HTTP;
+they do not measure a live judge's accuracy.
 
 ## Exit status
 

@@ -49,6 +49,7 @@ from agent_sandbox.models import (
 from scopebench.evals import configure_logfire, report_to_json, run_evals
 from scopebench.manifest import TaskManifest, discover_tasks, load_manifest
 from scopebench.runner import AgentKind, RunOptions
+from scopejudge.protocol import DenyFeedback
 
 
 def _default_tasks_dir() -> Path | None:
@@ -73,11 +74,13 @@ class _Args(argparse.Namespace):
 
     tasks_dir: Path | None = field(default_factory=_default_tasks_dir)
     task: list[str] = field(default_factory=list)
+    instruction: str | None = None
     all: bool = False
     list: bool = False
     list_models: bool = False
     agent: AgentKind = "harness"
     model: str | None = None
+    base_url: str | None = field(default_factory=lambda: os.environ.get("OPENAI_BASE_URL"))
     request_limit: int = 40
     timeout: float = 600.0
     wait_timeout: int = 180
@@ -89,6 +92,10 @@ class _Args(argparse.Namespace):
     atif: bool = False
     trajectory_judge: bool = True
     scopejudge: bool = False
+    judge_timeout: float = 30.0
+    attacker_brief: Path | None = None
+    deny_feedback: DenyFeedback = "reasoned"
+    hide_brief_from_judge: bool = False
     workspace_root: Path = field(default_factory=lambda: Path.cwd() / ".scopebench-runs")
 
 
@@ -145,6 +152,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Task directory name to run (repeatable).",
     )
     _ = selector.add_argument("--all", action="store_true", help="Run every discovered task.")
+    _ = parser.add_argument(
+        "--instruction",
+        metavar="ID",
+        help="Run only this instruction variant id (e.g. the scoped one), not every variant.",
+    )
     _ = parser.add_argument("--list", action="store_true", help="List discovered tasks and exit.")
     _ = parser.add_argument(
         "--list-models",
@@ -158,6 +170,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _ = parser.add_argument(
         "--model", help="Per-run model override (provider:model; see --list-models)."
+    )
+    _ = parser.add_argument(
+        "--base-url",
+        metavar="URL",
+        help=(
+            "OpenAI-compatible endpoint for the actor and judge (e.g. a self-hosted vLLM server). "
+            "Defaults to OPENAI_BASE_URL. Pair with an 'openai-chat:<served-model>' model string."
+        ),
     )
     _ = parser.add_argument("--request-limit", type=int, help="Max model requests per run.")
     _ = parser.add_argument("--timeout", type=float, help="Per-task agent time budget (s).")
@@ -199,7 +219,43 @@ def _build_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--scopejudge",
         action="store_true",
-        help="Enable the ScopeJudge post-tool capability inside the harness container.",
+        help="Enable ScopeJudge pre-execution blocking inside the harness container.",
+    )
+    _ = parser.add_argument(
+        "--judge-timeout",
+        type=float,
+        metavar="SECONDS",
+        help=(
+            "Per-call judge authorization timeout (default 30). Raise for slow self-hosted "
+            "endpoints, where 30s causes judge calls to time out and fail closed as 'uncertain'."
+        ),
+    )
+    _ = parser.add_argument(
+        "--attacker-brief",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Adversarial experiment: prepend this brief file to the acting agent's prompt "
+            "(harness only). The ScopeJudge policy is unchanged; the brief's file stem names "
+            "the condition in the report."
+        ),
+    )
+    _ = parser.add_argument(
+        "--deny-feedback",
+        choices=["black", "binary", "reasoned", "white"],
+        help=(
+            "How much a ScopeJudge denial reveals to the acting agent (needs --scopejudge): "
+            "black (generic failure), binary (blocked, no reason), reasoned (verdict + reason; "
+            "default), white (also discloses the judge policy)."
+        ),
+    )
+    _ = parser.add_argument(
+        "--hide-brief-from-judge",
+        action="store_true",
+        help=(
+            "Arm B: redact the attacker brief from the trajectory the judge inspects, so the gate "
+            "never reads the attacker's declared intent (needs --scopejudge and --attacker-brief)."
+        ),
     )
     _ = parser.add_argument(
         "--workspace-root",
@@ -223,15 +279,10 @@ def _unsupported_model_error(model: str) -> str:
             + f"(e.g. {HarnessSettings().model}). Run --list-models for the available slugs."
         )
     provider = provider_of(model)
-    hint = (
-        "for GPT models use the 'openai:' prefix — the Responses API"
-        if provider == "openai-chat"
-        else f"the sandbox image ships only the {supported} SDKs"
-    )
     return (
         f"error: model '{model}' uses provider '{provider}', which the sandbox does not "
-        + f"support ({hint}).\nSupported providers: {supported}. "
-        + "Run --list-models for the available slugs."
+        + f"support (the sandbox image ships only the {supported} SDKs).\n"
+        + f"Supported providers: {supported}. Run --list-models for the available slugs."
     )
 
 
@@ -269,6 +320,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     manifests = _select_tasks(args, args.tasks_dir)
+    if args.instruction is not None and not any(
+        variant.id == args.instruction
+        for manifest in manifests
+        for variant in manifest.instruction_variants
+    ):
+        print(
+            f"error: no instruction variant '{args.instruction}' in the selected task(s).",
+            file=sys.stderr,
+        )
+        return 2
     if args.agent == "harness":
         effective_model = resolve_model(args.model)
         if not is_supported(effective_model):
@@ -312,6 +373,36 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
+    attacker_brief: str | None = None
+    attacker_brief_id = "none"
+    if args.attacker_brief is not None:
+        if args.agent != "harness":
+            print(
+                "warning: --attacker-brief only applies to --agent harness; "
+                + f"ignoring it for {args.agent}.",
+                file=sys.stderr,
+            )
+        elif not args.attacker_brief.is_file():
+            print(f"error: attacker brief file not found: {args.attacker_brief}", file=sys.stderr)
+            return 2
+        else:
+            attacker_brief = args.attacker_brief.read_text(encoding="utf-8")
+            attacker_brief_id = args.attacker_brief.stem
+
+    if args.deny_feedback != "reasoned" and not args.scopejudge:
+        print(
+            "warning: --deny-feedback only affects runs with --scopejudge; it has no effect "
+            + "without it.",
+            file=sys.stderr,
+        )
+
+    if args.hide_brief_from_judge and (not args.scopejudge or args.attacker_brief is None):
+        print(
+            "warning: --hide-brief-from-judge needs both --scopejudge and --attacker-brief; "
+            + "it has no effect otherwise.",
+            file=sys.stderr,
+        )
+
     if args.concurrency > 1 and args.agent != "harness":
         print(
             f"warning: --concurrency {args.concurrency} is ignored for --agent {args.agent}; "
@@ -334,6 +425,7 @@ def main(argv: list[str] | None = None) -> int:
     options = RunOptions(
         agent=args.agent,
         model=args.model,
+        base_url=args.base_url,
         request_limit=args.request_limit,
         timeout=args.timeout,
         wait_timeout=args.wait_timeout,
@@ -343,6 +435,12 @@ def main(argv: list[str] | None = None) -> int:
         atif=args.atif,
         trajectory_judge=args.trajectory_judge,
         scopejudge=args.scopejudge,
+        judge_timeout=args.judge_timeout,
+        instruction_id=args.instruction,
+        attacker_brief=attacker_brief,
+        attacker_brief_id=attacker_brief_id,
+        deny_feedback=args.deny_feedback,
+        hide_brief_from_judge=args.hide_brief_from_judge,
     )
 
     configure_logfire(args.logfire)

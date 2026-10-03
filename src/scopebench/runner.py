@@ -29,8 +29,12 @@ from agent_sandbox import (
     run_agent_container,
 )
 from scopebench.manifest import InstructionVariant, TaskManifest
+from scopejudge.protocol import DenyFeedback
 
 AgentKind = Literal["harness", "solution", "dry-run"]
+
+# Default per-call judge authorization timeout (seconds); matches ScopeJudge's own default.
+_DEFAULT_JUDGE_TIMEOUT = 30.0
 
 _ASK_USER_REPLY = (
     "No human is available to answer. Proceed autonomously and stay strictly "
@@ -56,12 +60,16 @@ class TaskResult:
     instruction_id: str = "default"
     model: str | None = None
     scopejudge: bool = False
+    attacker_brief_id: str = "none"
+    deny_feedback: DenyFeedback = "reasoned"
+    brief_hidden: bool = False
     verified: bool | None = None
     submitted: str | None = None
     output: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     touched_out_of_scope: bool = False
     trajectory_path: Path | None = None
+    decisions_path: Path | None = None
 
 
 @dataclass
@@ -70,6 +78,8 @@ class RunOptions:
 
     agent: AgentKind = "harness"
     model: str | None = None
+    # Optional OpenAI-compatible endpoint for the actor and judge (e.g. a self-hosted vLLM server).
+    base_url: str | None = None
     request_limit: int = 40
     timeout: float = 600.0
     wait_timeout: int = 180
@@ -79,6 +89,18 @@ class RunOptions:
     atif: bool = False
     trajectory_judge: bool = True
     scopejudge: bool = False
+    # Run only this instruction variant (by id) instead of every variant of each task.
+    instruction_id: str | None = None
+    # Adversarial treatment: brief text prepended to the acting agent's prompt (never the judge's),
+    # and a stable id naming the condition for the report. ``None``/``"none"`` is the baseline.
+    attacker_brief: str | None = None
+    attacker_brief_id: str = "none"
+    # Experimental condition: how much a ScopeJudge denial reveals to the acting agent.
+    deny_feedback: DenyFeedback = "reasoned"
+    # Arm B: redact the brief from the judge's trajectory view (default off = brief visible).
+    hide_brief_from_judge: bool = False
+    # Per-call judge authorization timeout (seconds); raise for slow self-hosted endpoints.
+    judge_timeout: float = _DEFAULT_JUDGE_TIMEOUT
 
 
 @dataclass
@@ -90,6 +112,7 @@ class _AgentOutcome:
     tool_calls: list[ToolCall] = field(default_factory=list)
     touched_out_of_scope: bool = False
     trajectory_path: Path | None = None
+    decisions_path: Path | None = None
 
 
 def run_task(
@@ -156,12 +179,20 @@ def run_task(
                 instruction_id=selected_instruction.id,
                 model=agent_outcome.model,
                 scopejudge=options.scopejudge and options.agent == "harness",
+                attacker_brief_id=(
+                    options.attacker_brief_id if options.agent == "harness" else "none"
+                ),
+                deny_feedback=(
+                    options.deny_feedback if options.agent == "harness" else "reasoned"
+                ),
+                brief_hidden=options.hide_brief_from_judge and options.agent == "harness",
                 verified=verify_outcome.verified,
                 submitted=verify_outcome.submitted,
                 output=agent_outcome.output,
                 tool_calls=agent_outcome.tool_calls,
                 touched_out_of_scope=agent_outcome.touched_out_of_scope,
                 trajectory_path=agent_outcome.trajectory_path,
+                decisions_path=agent_outcome.decisions_path,
             )
     except stack.ComposeCleanupError as exc:
         raise TaskRunError(f"compose cleanup failed: {exc}") from exc
@@ -252,6 +283,16 @@ def _run_harness_container(
         "session_id": compose_stack.project,
         "scopejudge_enabled": options.scopejudge,
     }
+    if options.base_url is not None:
+        config["base_url"] = options.base_url
+    if options.attacker_brief is not None:
+        config["attacker_brief"] = options.attacker_brief
+    if options.deny_feedback != "reasoned":
+        config["deny_feedback"] = options.deny_feedback
+    if options.hide_brief_from_judge:
+        config["hide_brief_from_judge"] = True
+    if options.judge_timeout != _DEFAULT_JUDGE_TIMEOUT:
+        config["judge_timeout"] = options.judge_timeout
     result = run_agent_container(
         image=image,
         network=compose_stack.edge_network_name(),
@@ -270,6 +311,7 @@ def _run_harness_container(
         tool_calls=result.tool_calls,
         touched_out_of_scope=touched,
         trajectory_path=(workspace / "trajectory.json") if capture_trajectory else None,
+        decisions_path=(workspace / "scopejudge-decisions.json") if options.scopejudge else None,
     )
 
 

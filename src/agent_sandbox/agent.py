@@ -108,6 +108,12 @@ def _run_cmd(image: str, container: str, network: str, workspace: Path) -> list[
         container,
         "--network",
         network,
+        # Reach a model endpoint tunnelled to the host (e.g. a self-hosted vLLM server on
+        # Compute Canada via SSH port-forward) at host.docker.internal. Predefined on Docker
+        # Desktop/WSL; this mapping makes it resolve on native Linux Docker too. Harmless when
+        # the model is a public API.
+        "--add-host",
+        "host.docker.internal:host-gateway",
         "--hostname",
         "ops-01",
         "--user",

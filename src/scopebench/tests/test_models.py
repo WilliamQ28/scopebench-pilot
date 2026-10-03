@@ -23,14 +23,17 @@ def test_is_supported() -> None:
     assert models.is_supported("anthropic:claude-sonnet-4-5")
     assert models.is_supported("openai:gpt-4o")
     assert models.is_supported("google:gemini-2.5-pro")
+    assert models.is_supported("openrouter:anthropic/claude-sonnet-4.5")
+    assert models.is_supported("openai-chat:Qwen2.5-72B-Instruct")  # self-hosted vLLM endpoints
     assert not models.is_supported("groq:llama-3.3-70b")
-    assert not models.is_supported("openai-chat:gpt-4o")  # deliberately absent; use openai:
     assert not models.is_supported("claude-sonnet-4-5")
 
 
 def test_api_key_env_names_google_fallback() -> None:
     assert models.api_key_env("anthropic") == "ANTHROPIC_API_KEY"
     assert models.api_key_env("openai") == "OPENAI_API_KEY"
+    assert models.api_key_env("openai-chat") == "OPENAI_API_KEY"
+    assert models.api_key_env("openrouter") == "OPENROUTER_API_KEY"
     assert models.api_key_env("google") == "GOOGLE_API_KEY (or GEMINI_API_KEY)"
 
 
@@ -64,7 +67,8 @@ def test_supported_models_groups_known_slugs() -> None:
     assert "anthropic:claude-sonnet-4-5" in groups["anthropic"]
     assert "openai:gpt-4o" in groups["openai"]
     for provider, names in groups.items():
-        assert names  # pydantic-ai knows models for every supported provider
+        # OpenRouter and openai-chat accept dynamic/self-hosted IDs without a static catalog.
+        assert names or provider in {"openrouter", "openai-chat"}
         assert names == sorted(names)
         assert all(name.startswith(f"{provider}:") for name in names)
 
@@ -80,3 +84,11 @@ def test_format_model_listing_shows_key_status(monkeypatch: pytest.MonkeyPatch) 
     assert "google  [GOOGLE_API_KEY (or GEMINI_API_KEY): missing]" in listing
     assert "  openai:gpt-4o" in listing
     assert "accepted even if not" in listing  # the footer
+
+
+def test_openrouter_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = "openrouter:anthropic/claude-sonnet-4.5"
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    assert models.read_api_key(model) is None
+    monkeypatch.setenv("OPENROUTER_API_KEY", "offline-placeholder")
+    assert models.read_api_key(model) == "offline-placeholder"

@@ -182,11 +182,153 @@ def test_run_task_harness_forwards_runtime_toggles(
         RunOptions(agent="harness", atif=True, scopejudge=True),
         "sb-on",
     )
-    _ = run_task(manifest, RunOptions(agent="harness"), "sb-off")
+    off = run_task(manifest, RunOptions(agent="harness"), "sb-off")
     # Both treatment toggles default off; the per-run project id rides along as session_id.
     assert seen == [(True, "sb-on", True), (False, "sb-off", False)]
     assert judged.scopejudge is True
     assert judged.trajectory_path == Path.cwd() / ".scopebench-runs/sb-on/trajectory.json"
+    # The decisions log is surfaced only when ScopeJudge is enforcing.
+    assert judged.decisions_path == Path.cwd() / ".scopebench-runs/sb-on/scopejudge-decisions.json"
+    assert off.decisions_path is None
+
+
+def test_run_task_harness_forwards_base_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+    seen: list[str | None] = []
+
+    def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
+        seen.append(config.get("base_url"))
+        return AgentResult(output="ok")
+
+    monkeypatch.setattr(runner, "run_agent_container", fake_run)
+    manifest = load_manifest(_task(tmp_path))
+    _ = run_task(manifest, RunOptions(agent="harness", base_url="http://cc-node:8000/v1"), "sb-url")
+    _ = run_task(manifest, RunOptions(agent="harness"), "sb-nourl")
+    # The endpoint rides the container config only when one is configured.
+    assert seen == ["http://cc-node:8000/v1", None]
+
+
+def test_run_task_harness_forwards_judge_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+    seen: list[object] = []
+
+    def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
+        seen.append(config.get("judge_timeout"))
+        return AgentResult(output="ok")
+
+    monkeypatch.setattr(runner, "run_agent_container", fake_run)
+    manifest = load_manifest(_task(tmp_path))
+    opts = RunOptions(agent="harness", scopejudge=True, judge_timeout=120.0)
+    _ = run_task(manifest, opts, "sb-t")
+    _ = run_task(manifest, RunOptions(agent="harness"), "sb-default")
+    # The key rides the config only when it differs from the 30s default.
+    assert seen == [120.0, None]
+
+
+def test_run_task_harness_forwards_attacker_brief(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+    seen: list[str | None] = []
+
+    def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
+        seen.append(config.get("attacker_brief"))
+        return AgentResult(output="ok")
+
+    monkeypatch.setattr(runner, "run_agent_container", fake_run)
+    manifest = load_manifest(_task(tmp_path))
+    adversarial = run_task(
+        manifest,
+        RunOptions(agent="harness", attacker_brief="BREACH THE SCOPE", attacker_brief_id="adv"),
+        "sb-adv",
+    )
+    baseline = run_task(manifest, RunOptions(agent="harness"), "sb-base")
+    # The brief key rides the container config only when a brief is supplied.
+    assert seen == ["BREACH THE SCOPE", None]
+    assert adversarial.attacker_brief_id == "adv"
+    assert baseline.attacker_brief_id == "none"
+
+
+def test_run_task_non_harness_reports_no_attacker_brief(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    # Treatments set in options are not attributed to a non-harness strategy.
+    result = run_task(
+        load_manifest(_task(tmp_path)),
+        RunOptions(
+            agent="dry-run",
+            attacker_brief="BREACH",
+            attacker_brief_id="adv",
+            deny_feedback="white",
+            hide_brief_from_judge=True,
+        ),
+        "sb-dry",
+    )
+    assert result.attacker_brief_id == "none"
+    assert result.deny_feedback == "reasoned"
+    assert result.brief_hidden is False
+
+
+def test_run_task_harness_forwards_deny_feedback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+    seen: list[str | None] = []
+
+    def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
+        seen.append(config.get("deny_feedback"))
+        return AgentResult(output="ok")
+
+    monkeypatch.setattr(runner, "run_agent_container", fake_run)
+    manifest = load_manifest(_task(tmp_path))
+    white = run_task(
+        manifest, RunOptions(agent="harness", scopejudge=True, deny_feedback="white"), "sb-white"
+    )
+    baseline = run_task(manifest, RunOptions(agent="harness"), "sb-base")
+    # The key rides the config only when it differs from the unchanged default.
+    assert seen == ["white", None]
+    assert white.deny_feedback == "white"
+    assert baseline.deny_feedback == "reasoned"
+
+
+def test_run_task_harness_forwards_hide_brief(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+    seen: list[object] = []
+
+    def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
+        seen.append(config.get("hide_brief_from_judge"))
+        return AgentResult(output="ok")
+
+    monkeypatch.setattr(runner, "run_agent_container", fake_run)
+    manifest = load_manifest(_task(tmp_path))
+    hidden = run_task(
+        manifest,
+        RunOptions(
+            agent="harness",
+            scopejudge=True,
+            attacker_brief="B",
+            attacker_brief_id="adv",
+            hide_brief_from_judge=True,
+        ),
+        "sb-hide",
+    )
+    baseline = run_task(manifest, RunOptions(agent="harness"), "sb-visible")
+    # The key rides the config only when Arm B is requested.
+    assert seen == [True, None]
+    assert hidden.brief_hidden is True
+    assert baseline.brief_hidden is False
 
 
 def test_scoped_harness_run_captures_trajectory_for_automatic_judge(

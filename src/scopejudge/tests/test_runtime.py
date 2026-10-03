@@ -18,13 +18,27 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models import Model
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.openai import OpenAIResponsesModel
+from pydantic_ai.models.openrouter import OpenRouterModel
 
 from agent_harness import HarnessDeps, Trajectory
 from agent_harness.toolsets import ALL_TOOL_NAMES
 from scopejudge import __main__ as container_entrypoint
 from scopejudge import runtime
-from scopejudge.capability import ScopeJudge
+from scopejudge.capability import ScopeDecision, ScopeJudge
 from scopejudge.protocol import AgentConfig, AgentResult
+
+
+@pytest.fixture(autouse=True)
+def offline_scope_judge(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def allow(
+        _self: ScopeJudge,
+        _ctx: RunContext[HarnessDeps],
+        _call: ToolCallPart,
+        _args: ValidatedToolArgs,
+    ) -> ScopeDecision:
+        return ScopeDecision(verdict="allow", reason="Offline fixture authorizes this call.")
+
+    monkeypatch.setattr(ScopeJudge, "_judge", allow)
 
 
 def _text_model(text: str = "ok") -> FunctionModel:
@@ -40,11 +54,13 @@ def _cfg(
     atif: bool = False,
     request_limit: int = 5,
     scopejudge_enabled: bool = False,
+    base_url: str | None = None,
 ) -> AgentConfig:
     return AgentConfig(
         instruction="hi",
         model=model,
         api_key="k",
+        base_url=base_url,
         request_limit=request_limit,
         timeout=60.0,
         ask_user_reply="no human is available",
@@ -66,6 +82,22 @@ def test_build_model_openai_uses_responses_api() -> None:
     model = runtime._build_model(_cfg(model="openai:gpt-4o"))
     assert isinstance(model, OpenAIResponsesModel)
     assert model.model_name == "gpt-4o"
+
+
+def test_build_model_openrouter_uses_native_provider() -> None:
+    model = runtime._build_model(_cfg(model="openrouter:anthropic/claude-sonnet-4.5"))
+    assert isinstance(model, OpenRouterModel)
+    assert model.model_name == "anthropic/claude-sonnet-4.5"
+    assert str(model.base_url) == "https://openrouter.ai/api/v1/"
+
+
+def test_build_model_custom_base_url_targets_self_hosted_endpoint() -> None:
+    # Self-hosted vLLM (Compute Canada) speaks the Chat Completions API: openai-chat + base_url.
+    model = runtime._build_model(
+        _cfg(model="openai-chat:Qwen2.5-72B-Instruct", base_url="http://cc-node:8000/v1")
+    )
+    assert model.model_name == "Qwen2.5-72B-Instruct"
+    assert str(model.base_url) == "http://cc-node:8000/v1/"
 
 
 def test_build_model_google_key_comes_from_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -214,13 +246,16 @@ async def test_scopejudge_runs_after_each_completed_tool(
         result: object,
     ) -> object:
         observed.append(call)
-        return await original(
-            self,
-            ctx,
-            call=call,
-            tool_def=tool_def,
-            args=args,
-            result=result,
+        return cast(
+            "object",
+            await original(
+                self,
+                ctx,
+                call=call,
+                tool_def=tool_def,
+                args=args,
+                result=result,
+            ),
         )
 
     monkeypatch.setattr(ScopeJudge, "after_tool_execute", observe)
