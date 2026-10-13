@@ -131,6 +131,68 @@ def test_main_instruction_filter_threads_into_options(
     assert seen == ["default"]
 
 
+def test_main_threads_max_tool_result_chars_and_warns_off_harness(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    seen: list[int | None] = []
+
+    async def fake_run_evals(_manifests: object, options: RunOptions, **_kw: object) -> _FakeReport:
+        seen.append(options.max_tool_result_chars)
+        return _FakeReport()
+
+    def no_logfire(*_args: object) -> None:
+        pass
+
+    monkeypatch.setattr(cli, "run_evals", fake_run_evals)
+    monkeypatch.setattr(cli, "configure_logfire", no_logfire)
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--agent",
+        "solution",
+        "--max-tool-result-chars",
+        "4000",
+    ]
+    assert main(argv) == 0
+    assert seen == [4000]  # threaded into options regardless of strategy
+    assert "only applies to --agent harness" in capsys.readouterr().err
+
+
+def test_main_rejects_tiny_tool_result_cap(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _mock_eval(monkeypatch)
+    monkeypatch.setattr(cli, "ensure_image", lambda: "img")
+    monkeypatch.setattr(cli, "_load_dotenv", _noop_dotenv)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    argv = ["--all", "--tasks-dir", str(_tasks_dir(tmp_path)), "--max-tool-result-chars", "100"]
+    assert main(argv) == 2
+    assert "at least" in capsys.readouterr().err
+
+
+def test_main_accepts_valid_tool_result_cap_on_harness(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[int | None] = []
+
+    async def fake_run_evals(_manifests: object, options: RunOptions, **_kw: object) -> _FakeReport:
+        seen.append(options.max_tool_result_chars)
+        return _FakeReport()
+
+    def no_logfire(*_args: object) -> None:
+        pass
+
+    monkeypatch.setattr(cli, "run_evals", fake_run_evals)
+    monkeypatch.setattr(cli, "configure_logfire", no_logfire)
+    monkeypatch.setattr(cli, "ensure_image", lambda: "img")
+    monkeypatch.setattr(cli, "_load_dotenv", _noop_dotenv)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    argv = ["--all", "--tasks-dir", str(_tasks_dir(tmp_path)), "--max-tool-result-chars", "3000"]
+    assert main(argv) == 0
+    assert seen == [3000]  # a valid budget on harness threads through and runs
+
+
 def test_main_instruction_not_found_errors(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:

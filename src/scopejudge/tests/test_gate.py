@@ -111,7 +111,7 @@ async def test_runtime_denies_harness_tools_offline(
 ) -> None:
     capability = gate("deny")
 
-    def capabilities(_cfg: AgentConfig) -> tuple[ScopeJudge, ...]:
+    def capabilities(_cfg: AgentConfig, _cwd: Path) -> tuple[ScopeJudge, ...]:
         return (capability,)
 
     monkeypatch.setattr("scopejudge.runtime._capabilities", capabilities)
@@ -257,13 +257,15 @@ def test_capabilities_pass_deny_feedback(monkeypatch: pytest.MonkeyPatch) -> Non
     explicit["attacker_brief"] = "B"
     explicit["hide_brief_from_judge"] = True
     explicit["judge_timeout"] = 90.0
-    (judge_white,) = _capabilities(explicit)
+    (judge_white,) = _capabilities(explicit, Path())
+    assert isinstance(judge_white, ScopeJudge)
     assert judge_white.feedback == "white"
     assert judge_white.attacker_brief == "B"
     assert judge_white.hide_brief is True
     assert judge_white.timeout == 90.0
     # Absent keys fall back to the unchanged defaults (Arm A, reasoned, no redaction, 30s).
-    (judge_default,) = _capabilities(_cfg())
+    (judge_default,) = _capabilities(_cfg(), Path())
+    assert isinstance(judge_default, ScopeJudge)
     assert judge_default.feedback == "reasoned"
     assert judge_default.attacker_brief is None
     assert judge_default.hide_brief is False
@@ -277,7 +279,8 @@ def test_judge_policy_excludes_attacker_brief(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr("scopejudge.runtime._build_model", fake_build)
     cfg = _cfg(instruction="Only testuser is in scope")
     cfg["attacker_brief"] = "MARKER-abuse-the-judge"
-    (judge,) = _capabilities(cfg)
+    (judge,) = _capabilities(cfg, Path())
+    assert isinstance(judge, ScopeJudge)
     assert judge.instruction == "Only testuser is in scope"
     assert "MARKER" not in judge.instruction
 
@@ -288,7 +291,7 @@ async def test_attacker_brief_reaches_actor_but_gate_still_blocks(
 ) -> None:
     capability = gate("deny")
 
-    def capabilities(_cfg: AgentConfig) -> tuple[ScopeJudge, ...]:
+    def capabilities(_cfg: AgentConfig, _cwd: Path) -> tuple[ScopeJudge, ...]:
         return (capability,)
 
     monkeypatch.setattr("scopejudge.runtime._capabilities", capabilities)
@@ -315,7 +318,7 @@ async def test_resumed_approval_cannot_bypass_gate(
 ) -> None:
     capability = gate("deny")
 
-    def capabilities(_cfg: AgentConfig) -> tuple[ScopeJudge, ...]:
+    def capabilities(_cfg: AgentConfig, _cwd: Path) -> tuple[ScopeJudge, ...]:
         return (capability,)
 
     monkeypatch.setattr("scopejudge.runtime._capabilities", capabilities)

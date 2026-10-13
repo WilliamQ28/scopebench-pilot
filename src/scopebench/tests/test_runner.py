@@ -179,11 +179,11 @@ def test_run_task_harness_forwards_runtime_toggles(
     manifest = load_manifest(_task(tmp_path))
     judged = run_task(
         manifest,
-        RunOptions(agent="harness", atif=True, scopejudge=True),
+        RunOptions(agent="harness", atif=False, trajectory_judge=False, scopejudge=True),
         "sb-on",
     )
     off = run_task(manifest, RunOptions(agent="harness"), "sb-off")
-    # Both treatment toggles default off; the per-run project id rides along as session_id.
+    # The gate forces audit capture even when ATIF and retrospective judging are disabled.
     assert seen == [(True, "sb-on", True), (False, "sb-off", False)]
     assert judged.scopejudge is True
     assert judged.trajectory_path == Path.cwd() / ".scopebench-runs/sb-on/trajectory.json"
@@ -229,6 +229,25 @@ def test_run_task_harness_forwards_judge_timeout(
     _ = run_task(manifest, RunOptions(agent="harness"), "sb-default")
     # The key rides the config only when it differs from the 30s default.
     assert seen == [120.0, None]
+
+
+def test_run_task_harness_forwards_max_tool_result_chars(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+    seen: list[object] = []
+
+    def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
+        seen.append(config.get("max_tool_result_chars"))
+        return AgentResult(output="ok")
+
+    monkeypatch.setattr(runner, "run_agent_container", fake_run)
+    manifest = load_manifest(_task(tmp_path))
+    _ = run_task(manifest, RunOptions(agent="harness", max_tool_result_chars=4000), "sb-cap")
+    _ = run_task(manifest, RunOptions(agent="harness"), "sb-nocap")
+    # The cap rides the config only when a positive budget is configured.
+    assert seen == [4000, None]
 
 
 def test_run_task_harness_forwards_attacker_brief(
@@ -452,6 +471,34 @@ def test_run_task_surfaces_verification_infrastructure_failure(
     monkeypatch.setattr(verify, "collect", fail_verify)
     with pytest.raises(TaskRunError, match="verification infrastructure failed"):
         _ = run_task(load_manifest(_task(tmp_path)), RunOptions(agent="dry-run"), "p")
+
+
+def test_run_task_grades_capability_objective(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    task_yaml = _TASK_YAML_OK + "capability_verification:\n  method: script\n  script: cap.sh\n"
+    task_dir = _task(tmp_path, task_yaml)
+    _ = (task_dir / "cap.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+
+    def fake_collect(verification: object, *_args: object, **_kwargs: object) -> verify.VerifyOutcome:
+        # The in-scope capability verifier passes; the out-of-scope flag was not produced.
+        if getattr(verification, "script", None) == "cap.sh":
+            return verify.VerifyOutcome(verified=True, detail="capability reached")
+        return verify.VerifyOutcome(verified=None, detail="no flag", submitted=None)
+
+    monkeypatch.setattr(verify, "collect", fake_collect)
+    result = run_task(load_manifest(task_dir), RunOptions(agent="dry-run"), "sb-cap")
+    assert result.capability_verified is True
+    assert result.submitted is None  # out-of-scope objective not reached
+
+
+def test_run_task_without_capability_objective_leaves_it_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    result = run_task(load_manifest(_task(tmp_path)), RunOptions(agent="dry-run"), "sb-nocap")
+    assert result.capability_verified is None
 
 
 def test_run_task_solution_missing_script(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

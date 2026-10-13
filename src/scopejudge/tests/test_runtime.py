@@ -25,6 +25,7 @@ from agent_harness.toolsets import ALL_TOOL_NAMES
 from scopejudge import __main__ as container_entrypoint
 from scopejudge import runtime
 from scopejudge.capability import ScopeDecision, ScopeJudge
+from scopejudge.compaction import TruncateToolResults
 from scopejudge.protocol import AgentConfig, AgentResult
 
 
@@ -143,6 +144,27 @@ def test_capture_flag_no_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     assert result.submitted is None
 
 
+def test_capture_capability_bridges_to_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    src, out = tmp_path / "cap_src.txt", tmp_path / "cap_out.txt"
+    _ = src.write_text("FLAG{cap}\n", encoding="utf-8")
+    monkeypatch.setattr(runtime, "_CAPABILITY_SRC", src)
+    monkeypatch.setattr(runtime, "_CAPABILITY_OUT", out)
+    runtime._capture_capability()
+    assert out.read_text(encoding="utf-8") == "FLAG{cap}\n"  # copied verbatim for the verifier
+
+
+def test_capture_capability_no_file_is_noop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    out = tmp_path / "cap_out.txt"
+    monkeypatch.setattr(runtime, "_CAPABILITY_SRC", tmp_path / "absent")
+    monkeypatch.setattr(runtime, "_CAPABILITY_OUT", out)
+    runtime._capture_capability()
+    assert not out.exists()
+
+
 def _deferred_then_text() -> FunctionModel:
     state = {"n": 0}
 
@@ -188,12 +210,42 @@ def test_tool_calls_extract_complete_arguments() -> None:
     assert marker in calls[0].args
 
 
-def test_scopejudge_capability_is_explicitly_toggled() -> None:
+def test_scopejudge_capability_is_explicitly_toggled(tmp_path: Path) -> None:
     assert container_entrypoint.main is runtime.main
-    assert runtime._capabilities(_cfg(scopejudge_enabled=False)) == ()
-    capabilities = runtime._capabilities(_cfg(scopejudge_enabled=True))
+    assert runtime._capabilities(_cfg(scopejudge_enabled=False), tmp_path) == ()
+    capabilities = runtime._capabilities(_cfg(scopejudge_enabled=True), tmp_path)
     assert len(capabilities) == 1
     assert isinstance(capabilities[0], ScopeJudge)
+
+
+def test_compaction_capability_added_only_when_configured(tmp_path: Path) -> None:
+    # Absent/0 budget leaves baseline runs untouched; a positive budget adds the compactor.
+    assert runtime._capabilities(_cfg(), tmp_path) == ()
+    off = _cfg()
+    off["max_tool_result_chars"] = 0
+    assert runtime._capabilities(off, tmp_path) == ()
+
+    compact_only = _cfg()
+    compact_only["max_tool_result_chars"] = 2000
+    caps = runtime._capabilities(compact_only, tmp_path)
+    assert len(caps) == 1
+    assert isinstance(caps[0], TruncateToolResults)
+
+    both = _cfg(scopejudge_enabled=True)
+    both["max_tool_result_chars"] = 2000
+    caps_both = runtime._capabilities(both, tmp_path)
+    # The judge gates first; the compactor shapes only results the judge has allowed.
+    assert [type(cap) for cap in caps_both] == [ScopeJudge, TruncateToolResults]
+
+
+async def test_run_agent_compaction_only_writes_no_decisions(tmp_path: Path) -> None:
+    # A compaction-only run carries no ScopeJudge, so run_agent must skip it in the decisions
+    # loop and emit no decisions file (exercises the non-ScopeJudge capability path).
+    cfg = _cfg()
+    cfg["max_tool_result_chars"] = 2000
+    out = await runtime.run_agent(cfg, model=_text_model("done"), deps=HarnessDeps(cwd=tmp_path))
+    assert out["output"] == "done"
+    assert not (tmp_path / "scopejudge-decisions.json").exists()
 
 
 def _todo_then_text() -> FunctionModel:

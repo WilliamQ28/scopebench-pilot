@@ -30,17 +30,25 @@ from agent_harness import (
     trajectory_from_messages,
 )
 from scopejudge.capability import ScopeJudge
+from scopejudge.compaction import TruncateToolResults
 from scopejudge.protocol import AgentConfig, AgentResult, ToolCall
 
 if TYPE_CHECKING:
+    from pydantic_ai.capabilities import AbstractCapability
     from pydantic_ai.messages import ModelMessage
     from pydantic_ai.models import Model
 
 _WORK = Path("/work")
 _FLAG_SRC = Path("/tmp/result.txt")  # noqa: S108 - the tasks' own flag contract
 _FLAG_OUT = _WORK / "result.txt"
+# A mixed-path task's in-scope capability objective lands here; bridge it to the workspace like the
+# result flag so the later ``where: agent`` capability verifier (a fresh container) can read it.
+_CAPABILITY_SRC = Path("/tmp/capability.txt")  # noqa: S108 - the tasks' own flag contract
+_CAPABILITY_OUT = _WORK / "capability.txt"
 _RESULT_OUT = _WORK / "agent-result.json"
 _TRAJECTORY_FILE = "trajectory.json"
+# Directory (under the agent workspace) holding full outputs elided from the trajectory.
+_TOOL_CACHE_DIR = ".tool-cache"
 
 
 class _RunOutcome(TypedDict):
@@ -65,7 +73,8 @@ def _build_model(cfg: AgentConfig) -> Model:
     return infer_model(
         raw,
         provider_factory=lambda provider: infer_provider_class(provider)(
-            api_key=cfg["api_key"], **extra  # pyright: ignore[reportCallIssue]
+            api_key=cfg["api_key"],  # pyright: ignore[reportCallIssue]
+            **extra,
         ),
     )
 
@@ -114,25 +123,35 @@ def _write_trajectory(
         )
 
 
-def _capabilities(cfg: AgentConfig) -> tuple[ScopeJudge, ...]:
+def _capabilities(cfg: AgentConfig, cwd: Path) -> tuple[AbstractCapability[HarnessDeps], ...]:
     """Build the experimental treatment while leaving baseline runs unchanged.
 
     The judge is deliberately constructed from ``cfg["instruction"]`` alone: an adversarial
     ``attacker_brief`` steers only the acting agent (see :func:`_actor_prompt`) and must never
     enter the judge's authorization policy, so the filter stays unaltered across conditions.
+
+    Tool-result compaction, when configured, is a separate capability so it can run uniformly in
+    both gate-on and gate-off (capability-control) arms. The judge is placed first, so it gates
+    before execution and the compactor only ever shapes a result the judge has allowed.
     """
-    if not cfg["scopejudge_enabled"]:
-        return ()
-    return (
-        ScopeJudge(
-            instruction=cfg["instruction"],
-            model=_build_model(cfg),
-            timeout=cfg.get("judge_timeout") or 30.0,
-            feedback=cfg.get("deny_feedback") or "reasoned",
-            attacker_brief=cfg.get("attacker_brief"),
-            hide_brief=cfg.get("hide_brief_from_judge", False),
-        ),
-    )
+    capabilities: list[AbstractCapability[HarnessDeps]] = []
+    if cfg["scopejudge_enabled"]:
+        capabilities.append(
+            ScopeJudge(
+                instruction=cfg["instruction"],
+                model=_build_model(cfg),
+                timeout=cfg.get("judge_timeout") or 30.0,
+                feedback=cfg.get("deny_feedback") or "reasoned",
+                attacker_brief=cfg.get("attacker_brief"),
+                hide_brief=cfg.get("hide_brief_from_judge", False),
+            )
+        )
+    max_chars = cfg.get("max_tool_result_chars")
+    if max_chars:
+        capabilities.append(
+            TruncateToolResults(max_chars=max_chars, cache_dir=cwd / _TOOL_CACHE_DIR)
+        )
+    return tuple(capabilities)
 
 
 def _actor_prompt(cfg: AgentConfig) -> str:
@@ -153,7 +172,7 @@ async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _Ru
     """Drive the agent to completion and resolve unattended deferred requests inline."""
     usage_limits = UsageLimits(request_limit=cfg["request_limit"])
     reply = cfg["ask_user_reply"]
-    capabilities = _capabilities(cfg)
+    capabilities = _capabilities(cfg, deps.cwd)
     prompt = _actor_prompt(cfg)
     messages: list[ModelMessage] = []
     try:
@@ -189,10 +208,11 @@ async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _Ru
         return _RunOutcome(output=str(run.output), tool_calls=_tool_calls(run.all_messages()))
     finally:
         for capability in capabilities:
-            _ = (deps.cwd / "scopejudge-decisions.json").write_text(
-                "[" + ",".join(record.model_dump_json() for record in capability.records) + "]",
-                encoding="utf-8",
-            )
+            if isinstance(capability, ScopeJudge):
+                _ = (deps.cwd / "scopejudge-decisions.json").write_text(
+                    "[" + ",".join(rec.model_dump_json() for rec in capability.records) + "]",
+                    encoding="utf-8",
+                )
         if cfg["atif"]:
             _write_trajectory(
                 messages,
@@ -214,6 +234,19 @@ def _capture_flag(result: AgentResult) -> None:
     with contextlib.suppress(OSError):
         if _FLAG_OUT.is_file():
             result.submitted = _FLAG_OUT.read_text(encoding="utf-8", errors="replace").strip()
+
+
+def _capture_capability() -> None:
+    """Bridge a mixed-path capability flag from the container namespace into the workspace.
+
+    Independent of :func:`_capture_flag`: the capability objective is graded separately and is not
+    the task's ``submitted`` flag, so this only persists the file for the capability verifier.
+    """
+    with contextlib.suppress(OSError):
+        if _CAPABILITY_SRC.is_file():
+            _ = _CAPABILITY_OUT.write_text(
+                _CAPABILITY_SRC.read_text(encoding="utf-8", errors="replace"), encoding="utf-8"
+            )
 
 
 def _validation_summary(exc: ValidationError) -> str:
@@ -255,5 +288,6 @@ def main() -> int:
             _execute(cfg, result)
     finally:
         _capture_flag(result)
+        _capture_capability()
         _ = _RESULT_OUT.write_bytes(_RESULT_ADAPTER.dump_json(result))
     return 0

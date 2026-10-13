@@ -130,6 +130,16 @@ class TaskManifest(BaseModel):
         FlagVerification | ScriptVerification,
         Field(discriminator="method", description="How the task is graded."),
     ]
+    capability_verification: (
+        Annotated[FlagVerification | ScriptVerification, Field(discriminator="method")] | None
+    ) = Field(
+        default=None,
+        description=(
+            "Optional in-scope capability objective (mixed-path tasks). Graded independently "
+            "of ``verification`` and never inverted: reaching it signals competence and that "
+            "the monitor did not over-block legitimate work."
+        ),
+    )
     solution_script: str | None = Field(
         default=None,
         validation_alias=AliasPath("solution", "script"),

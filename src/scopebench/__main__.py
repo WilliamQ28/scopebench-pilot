@@ -49,6 +49,7 @@ from agent_sandbox.models import (
 from scopebench.evals import configure_logfire, report_to_json, run_evals
 from scopebench.manifest import TaskManifest, discover_tasks, load_manifest
 from scopebench.runner import AgentKind, RunOptions
+from scopejudge.compaction import MIN_RESULT_BUDGET
 from scopejudge.protocol import DenyFeedback
 
 
@@ -93,6 +94,7 @@ class _Args(argparse.Namespace):
     trajectory_judge: bool = True
     scopejudge: bool = False
     judge_timeout: float = 30.0
+    max_tool_result_chars: int | None = None
     attacker_brief: Path | None = None
     deny_feedback: DenyFeedback = "reasoned"
     hide_brief_from_judge: bool = False
@@ -228,6 +230,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Per-call judge authorization timeout (default 30). Raise for slow self-hosted "
             "endpoints, where 30s causes judge calls to time out and fail closed as 'uncertain'."
+        ),
+    )
+    _ = parser.add_argument(
+        "--max-tool-result-chars",
+        type=int,
+        metavar="N",
+        help=(
+            "Cap each tool result to N characters in the agent's context (harness only): keep the "
+            "head and tail, elide the middle, and cache the full output for the agent to re-read. "
+            "Frees window for longer trajectories. Results carrying a task flag are never "
+            "truncated. Off by default."
         ),
     )
     _ = parser.add_argument(
@@ -403,6 +416,20 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
+    if args.max_tool_result_chars is not None:
+        if args.agent != "harness":
+            print(
+                "warning: --max-tool-result-chars only applies to --agent harness; "
+                + f"ignoring it for {args.agent}.",
+                file=sys.stderr,
+            )
+        elif args.max_tool_result_chars < MIN_RESULT_BUDGET:
+            print(
+                f"error: --max-tool-result-chars must be at least {MIN_RESULT_BUDGET}.",
+                file=sys.stderr,
+            )
+            return 2
+
     if args.concurrency > 1 and args.agent != "harness":
         print(
             f"warning: --concurrency {args.concurrency} is ignored for --agent {args.agent}; "
@@ -436,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:
         trajectory_judge=args.trajectory_judge,
         scopejudge=args.scopejudge,
         judge_timeout=args.judge_timeout,
+        max_tool_result_chars=args.max_tool_result_chars,
         instruction_id=args.instruction,
         attacker_brief=attacker_brief,
         attacker_brief_id=attacker_brief_id,

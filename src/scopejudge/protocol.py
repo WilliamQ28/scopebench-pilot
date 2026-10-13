@@ -43,6 +43,10 @@ class AgentConfig(TypedDict):
     # Per-call authorization timeout for the judge (seconds). Absent = 30. Slow self-hosted
     # endpoints need a larger value, else judge calls time out and fail closed as ``uncertain``.
     judge_timeout: NotRequired[float]
+    # Context control: cap each string tool result to this many characters in the trajectory,
+    # keeping the head and tail and writing the full output to a per-call cache file the agent can
+    # re-read. Results carrying a task flag are never truncated. Absent/None/0 = off (unchanged).
+    max_tool_result_chars: NotRequired[int | None]
 
 
 @dataclass

@@ -65,6 +65,8 @@ class TaskResult:
     brief_hidden: bool = False
     verified: bool | None = None
     submitted: str | None = None
+    # Independent in-scope capability objective (mixed-path tasks); None when the task declares none.
+    capability_verified: bool | None = None
     output: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     touched_out_of_scope: bool = False
@@ -101,6 +103,10 @@ class RunOptions:
     hide_brief_from_judge: bool = False
     # Per-call judge authorization timeout (seconds); raise for slow self-hosted endpoints.
     judge_timeout: float = _DEFAULT_JUDGE_TIMEOUT
+    # Context control: cap each string tool result to this many characters in the trajectory
+    # (head+tail kept, full output cached for re-reading). None/0 = off. Applies to both gate-on
+    # and gate-off harness runs, so it stays uniform across arms.
+    max_tool_result_chars: int | None = None
 
 
 @dataclass
@@ -160,6 +166,7 @@ def run_task(
                 compose_stack,
                 capture_trajectory=(
                     options.atif
+                    or options.scopejudge
                     or (options.trajectory_judge and selected_instruction.scope == "scoped")
                 ),
             )
@@ -172,6 +179,17 @@ def run_task(
                 compose_stack.backend_network_name(),
                 agent_in_container=options.agent == "harness",
             )
+            capability_verified: bool | None = None
+            if manifest.capability_verification is not None:
+                capability_verified = verify.collect(
+                    manifest.capability_verification,
+                    manifest.dir,
+                    workspace,
+                    script_env,
+                    network_env,
+                    compose_stack.backend_network_name(),
+                    agent_in_container=options.agent == "harness",
+                ).verified
             return TaskResult(
                 slug=manifest.slug,
                 name=manifest.name,
@@ -182,12 +200,11 @@ def run_task(
                 attacker_brief_id=(
                     options.attacker_brief_id if options.agent == "harness" else "none"
                 ),
-                deny_feedback=(
-                    options.deny_feedback if options.agent == "harness" else "reasoned"
-                ),
+                deny_feedback=(options.deny_feedback if options.agent == "harness" else "reasoned"),
                 brief_hidden=options.hide_brief_from_judge and options.agent == "harness",
                 verified=verify_outcome.verified,
                 submitted=verify_outcome.submitted,
+                capability_verified=capability_verified,
                 output=agent_outcome.output,
                 tool_calls=agent_outcome.tool_calls,
                 touched_out_of_scope=agent_outcome.touched_out_of_scope,
@@ -293,6 +310,8 @@ def _run_harness_container(
         config["hide_brief_from_judge"] = True
     if options.judge_timeout != _DEFAULT_JUDGE_TIMEOUT:
         config["judge_timeout"] = options.judge_timeout
+    if options.max_tool_result_chars:
+        config["max_tool_result_chars"] = options.max_tool_result_chars
     result = run_agent_container(
         image=image,
         network=compose_stack.edge_network_name(),
