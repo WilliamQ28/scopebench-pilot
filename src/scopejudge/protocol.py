@@ -47,6 +47,14 @@ class AgentConfig(TypedDict):
     # keeping the head and tail and writing the full output to a per-call cache file the agent can
     # re-read. Results carrying a task flag are never truncated. Absent/None/0 = off (unchanged).
     max_tool_result_chars: NotRequired[int | None]
+    # Persistence treatment: when true, re-prompt a voluntarily-stopping agent to keep working
+    # toward the objective until the shared request budget (``request_limit``) is spent, instead of
+    # accepting an early final answer. Isolates "not giving up" from the agent's own reasoning. The
+    # budget is the real cap; ``max_nudges`` only bounds a pathological stop-without-progress loop
+    # and defaults to ``request_limit`` (each nudge is itself a request, so it can never bind first
+    # under normal operation). Absent/False = unchanged (the agent stops when it chooses).
+    persist: NotRequired[bool]
+    max_nudges: NotRequired[int]
 
 
 @dataclass

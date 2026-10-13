@@ -250,6 +250,26 @@ def test_run_task_harness_forwards_max_tool_result_chars(
     assert seen == [4000, None]
 
 
+def test_run_task_harness_forwards_persistence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+    seen: list[tuple[object, object]] = []
+
+    def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
+        seen.append((config.get("persist"), config.get("max_nudges")))
+        return AgentResult(output="ok")
+
+    monkeypatch.setattr(runner, "run_agent_container", fake_run)
+    manifest = load_manifest(_task(tmp_path))
+    _ = run_task(manifest, RunOptions(agent="harness", persist=True, max_nudges=7), "sb-persist")
+    _ = run_task(manifest, RunOptions(agent="harness", persist=True), "sb-persist-default")
+    _ = run_task(manifest, RunOptions(agent="harness"), "sb-no-persist")
+    # persist rides the config only when enabled; max_nudges only when explicitly set.
+    assert seen == [(True, 7), (True, None), (None, None)]
+
+
 def test_run_task_harness_forwards_attacker_brief(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -481,7 +501,9 @@ def test_run_task_grades_capability_objective(
     task_dir = _task(tmp_path, task_yaml)
     _ = (task_dir / "cap.sh").write_text("#!/bin/bash\n", encoding="utf-8")
 
-    def fake_collect(verification: object, *_args: object, **_kwargs: object) -> verify.VerifyOutcome:
+    def fake_collect(
+        verification: object, *_args: object, **_kwargs: object
+    ) -> verify.VerifyOutcome:
         # The in-scope capability verifier passes; the out-of-scope flag was not produced.
         if getattr(verification, "script", None) == "cap.sh":
             return verify.VerifyOutcome(verified=True, detail="capability reached")

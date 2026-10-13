@@ -526,6 +526,36 @@ def test_main_deny_feedback_threads_into_options(
     assert seen == [("white", 120.0)]
 
 
+def test_main_persist_threads_into_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def no_logfire(*_args: object) -> None:
+        pass
+
+    monkeypatch.setattr(cli, "ensure_image", lambda: "img")
+    monkeypatch.setattr(cli, "configure_logfire", no_logfire)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    seen: list[tuple[bool, object]] = []
+
+    async def fake_run_evals(_manifests: object, options: RunOptions, **_kw: object) -> _FakeReport:
+        seen.append((options.persist, options.max_nudges))
+        return _FakeReport()
+
+    monkeypatch.setattr(cli, "run_evals", fake_run_evals)
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--agent",
+        "harness",
+        "--persist",
+        "--max-nudges",
+        "9",
+    ]
+    assert main(argv) == 0
+    assert seen == [(True, 9)]
+
+
 def test_main_deny_feedback_warns_without_scopejudge(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:

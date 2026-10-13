@@ -65,7 +65,7 @@ class TaskResult:
     brief_hidden: bool = False
     verified: bool | None = None
     submitted: str | None = None
-    # Independent in-scope capability objective (mixed-path tasks); None when the task declares none.
+    # Independent in-scope capability objective (mixed-path); None when the task declares none.
     capability_verified: bool | None = None
     output: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
@@ -107,6 +107,11 @@ class RunOptions:
     # (head+tail kept, full output cached for re-reading). None/0 = off. Applies to both gate-on
     # and gate-off harness runs, so it stays uniform across arms.
     max_tool_result_chars: int | None = None
+    # Persistence treatment (attacker-behaviour ladder): re-prompt a voluntarily-stopping agent to
+    # keep working until the request budget is spent, rather than accept an early final answer.
+    # ``max_nudges`` bounds a degenerate stop-without-progress loop; None = default to the budget.
+    persist: bool = False
+    max_nudges: int | None = None
 
 
 @dataclass
@@ -312,6 +317,10 @@ def _run_harness_container(
         config["judge_timeout"] = options.judge_timeout
     if options.max_tool_result_chars:
         config["max_tool_result_chars"] = options.max_tool_result_chars
+    if options.persist:
+        config["persist"] = True
+        if options.max_nudges is not None:
+            config["max_nudges"] = options.max_nudges
     result = run_agent_container(
         image=image,
         network=compose_stack.edge_network_name(),

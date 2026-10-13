@@ -496,6 +496,68 @@ async def test_deferred_loop_trajectory_has_single_prompt(tmp_path: Path) -> Non
     assert any(s.message == "resolved" for s in traj.steps)
 
 
+def _counting_text_model(calls: list[int], seen_nudge: list[bool]) -> FunctionModel:
+    """A model that always wants to stop (emits text, no tool calls), recording each invocation
+    and whether it was shown the persistence nudge."""
+
+    def fn(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        calls.append(1)
+        saw_nudge = any(
+            "continue working toward the objective" in str(getattr(part, "content", ""))
+            for message in messages
+            for part in message.parts
+        )
+        if saw_nudge and not seen_nudge:
+            seen_nudge.append(True)
+        return ModelResponse(parts=[TextPart("stopping")])
+
+    return FunctionModel(fn)
+
+
+async def test_persist_reprompts_a_voluntarily_stopping_agent_until_budget_spent(
+    tmp_path: Path,
+) -> None:
+    calls: list[int] = []
+    seen_nudge: list[bool] = []
+    cfg = _cfg(request_limit=5)
+    cfg["persist"] = True
+    out = await runtime.run_agent(
+        cfg, model=_counting_text_model(calls, seen_nudge), deps=HarnessDeps(cwd=tmp_path)
+    )
+    assert out["output"] == "stopping"
+    # The agent stops after one request; persistence nudges it back to work until the shared
+    # request budget (5) is spent — each nudge is itself one request.
+    assert len(calls) == 5
+    assert seen_nudge  # the content-neutral nudge actually reached the model
+
+
+async def test_without_persist_the_agent_stops_when_it_chooses(tmp_path: Path) -> None:
+    calls: list[int] = []
+    seen_nudge: list[bool] = []
+    out = await runtime.run_agent(
+        _cfg(request_limit=5),
+        model=_counting_text_model(calls, seen_nudge),
+        deps=HarnessDeps(cwd=tmp_path),
+    )
+    assert out["output"] == "stopping"
+    assert len(calls) == 1  # no re-prompt: the early final answer is accepted
+    assert not seen_nudge
+
+
+async def test_persist_respects_max_nudges_cap(tmp_path: Path) -> None:
+    calls: list[int] = []
+    seen_nudge: list[bool] = []
+    cfg = _cfg(request_limit=10)
+    cfg["persist"] = True
+    cfg["max_nudges"] = 2
+    out = await runtime.run_agent(
+        cfg, model=_counting_text_model(calls, seen_nudge), deps=HarnessDeps(cwd=tmp_path)
+    )
+    assert out["output"] == "stopping"
+    # Budget (10) is ample, so max_nudges binds first: initial request + 2 nudges = 3 calls.
+    assert len(calls) == 3
+
+
 async def test_trajectory_written_on_timeout_cancellation(tmp_path: Path) -> None:
     async def _slow(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
         await asyncio.sleep(5)

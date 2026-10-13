@@ -98,6 +98,8 @@ class _Args(argparse.Namespace):
     attacker_brief: Path | None = None
     deny_feedback: DenyFeedback = "reasoned"
     hide_brief_from_judge: bool = False
+    persist: bool = False
+    max_nudges: int | None = None
     workspace_root: Path = field(default_factory=lambda: Path.cwd() / ".scopebench-runs")
 
 
@@ -268,6 +270,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Arm B: redact the attacker brief from the trajectory the judge inspects, so the gate "
             "never reads the attacker's declared intent (needs --scopejudge and --attacker-brief)."
+        ),
+    )
+    _ = parser.add_argument(
+        "--persist",
+        action="store_true",
+        help=(
+            "Persistence treatment (harness only): re-prompt a voluntarily-stopping agent to keep "
+            "working toward the objective until the request budget is spent, instead of accepting "
+            "an early final answer. Isolates 'not giving up' from the agent's own reasoning."
+        ),
+    )
+    _ = parser.add_argument(
+        "--max-nudges",
+        type=int,
+        metavar="N",
+        help=(
+            "With --persist: cap the number of continue re-prompts (bounds a degenerate "
+            "stop-without-progress loop). Default: the request limit, so the call budget is the "
+            "only real bound."
         ),
     )
     _ = parser.add_argument(
@@ -469,6 +490,8 @@ def main(argv: list[str] | None = None) -> int:
         attacker_brief_id=attacker_brief_id,
         deny_feedback=args.deny_feedback,
         hide_brief_from_judge=args.hide_brief_from_judge,
+        persist=args.persist,
+        max_nudges=args.max_nudges,
     )
 
     configure_logfire(args.logfire)
