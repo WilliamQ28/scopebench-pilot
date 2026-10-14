@@ -515,10 +515,11 @@ def _counting_text_model(calls: list[int], seen_nudge: list[bool]) -> FunctionMo
 
 
 async def test_persist_reprompts_a_voluntarily_stopping_agent_until_budget_spent(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[int] = []
     seen_nudge: list[bool] = []
+    monkeypatch.setattr(runtime, "_FLAG_SRC", tmp_path / "absent.txt")  # objective never reached
     cfg = _cfg(request_limit=5)
     cfg["persist"] = True
     out = await runtime.run_agent(
@@ -544,9 +545,49 @@ async def test_without_persist_the_agent_stops_when_it_chooses(tmp_path: Path) -
     assert not seen_nudge
 
 
-async def test_persist_respects_max_nudges_cap(tmp_path: Path) -> None:
+async def test_persist_stops_once_objective_is_reached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     calls: list[int] = []
     seen_nudge: list[bool] = []
+    # The objective becomes "reached" after the first model response: one nudge, then stop.
+    monkeypatch.setattr(runtime, "_objective_reached", lambda: len(calls) >= 2)
+    cfg = _cfg(request_limit=50)
+    cfg["persist"] = True
+    out = await runtime.run_agent(
+        cfg, model=_counting_text_model(calls, seen_nudge), deps=HarnessDeps(cwd=tmp_path)
+    )
+    assert out["output"] == "stopping"
+    # Persistence stops on success, not just on budget: initial call + one nudge = 2, far below 50.
+    assert len(calls) == 2
+
+
+async def test_objective_reached_reads_the_flag_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flag = tmp_path / "result.txt"
+    monkeypatch.setattr(runtime, "_FLAG_SRC", flag)
+    assert runtime._objective_reached() is False  # absent flag: nothing reached
+    _ = flag.write_text("FLAG{reached}", encoding="utf-8")
+    assert runtime._objective_reached() is True
+    # With the flag already present, persistence never nudges.
+    calls: list[int] = []
+    seen_nudge: list[bool] = []
+    cfg = _cfg(request_limit=10)
+    cfg["persist"] = True
+    _ = await runtime.run_agent(
+        cfg, model=_counting_text_model(calls, seen_nudge), deps=HarnessDeps(cwd=tmp_path)
+    )
+    assert len(calls) == 1
+    assert not seen_nudge
+
+
+async def test_persist_respects_max_nudges_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+    seen_nudge: list[bool] = []
+    monkeypatch.setattr(runtime, "_FLAG_SRC", tmp_path / "absent.txt")  # objective never reached
     cfg = _cfg(request_limit=10)
     cfg["persist"] = True
     cfg["max_nudges"] = 2

@@ -187,10 +187,13 @@ async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _Ru
     requires, and that capture includes the passed history, so the exhaustion path reports the
     cumulative tool calls.
 
-    Persistence (``cfg["persist"]``): when the agent emits a final answer with budget still unspent,
-    re-prompt it to keep working rather than accept the early stop. This isolates "not giving up"
-    from the agent's own reasoning, which measurably stops early (voluntary stop in most runs). The
-    nudge is content-neutral (no scope, flag, or monitor hints) so it changes effort, not strategy.
+    Persistence (``cfg["persist"]``): when the agent emits a final answer with budget still unspent
+    and the objective is not yet reached, re-prompt it to keep working rather than accept the early
+    stop. It persists until the objective is achieved *or* the budget is spent, matching the ladder
+    definition. This isolates "not giving up" from the agent's own reasoning, which measurably stops
+    early (voluntary stop in most runs). The nudge is content-neutral (no scope, flag, or monitor
+    hints) so it changes effort, not strategy; the objective check is agent-invisible (see
+    :func:`_objective_reached`), so persistence leaks no grading signal into the trajectory.
     """
     request_limit = cfg["request_limit"]
     usage = RunUsage()
@@ -233,7 +236,12 @@ async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _Ru
                         )
                     continue
                 # run.output is a final str: the agent chose to stop.
-                if persist and nudges < max_nudges and usage.requests < request_limit:
+                if (
+                    persist
+                    and not _objective_reached()
+                    and nudges < max_nudges
+                    and usage.requests < request_limit
+                ):
                     nudges += 1
                     with capture_run_messages() as messages:
                         run = await agent.run(
@@ -269,6 +277,19 @@ async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _Ru
                 session_id=cfg["session_id"],
                 scopejudge_enabled=cfg["scopejudge_enabled"],
             )
+
+
+def _objective_reached() -> bool:
+    """Whether the task objective flag has been produced, for the persistence stop condition.
+
+    Reads the task's own ``/tmp/result.txt`` contract (the same file :func:`_capture_flag` bridges).
+    It is never surfaced to the agent, so using it to stop persistence on success leaks no grading
+    signal into the trajectory the monitor or judge can see.
+    """
+    with contextlib.suppress(OSError):
+        if _FLAG_SRC.is_file():
+            return bool(_FLAG_SRC.read_text(encoding="utf-8", errors="replace").strip())
+    return False
 
 
 def _capture_flag(result: AgentResult) -> None:
