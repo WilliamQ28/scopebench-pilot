@@ -23,7 +23,24 @@ site/
 
 # ScopeBench runner artifacts
 .scopebench-runs/
+.scopebench-runs-ab/
+.scopefirewall-runs/
 *.report.json
+
+# Experiment run outputs (not source): keep top-level experiments/*.md and experiments/*.sh
+# (the design doc and the runner), ignore the dated run-instance directories entirely.
+*-results/
+experiments/*/
+# Ad-hoc run outputs that have accumulated at the repo root.
+/run-*.json
+/run-*.log
+/aleph-*.json
+/aleph-*.log
+/abtest-*.json
+/smoke-*.json
+
+# Crash dumps
+*.stackdump
 
 # macOS metadata
 .DS_Store
