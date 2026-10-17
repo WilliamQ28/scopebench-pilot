@@ -82,6 +82,8 @@ class _Args(argparse.Namespace):
     agent: AgentKind = "harness"
     model: str | None = None
     base_url: str | None = field(default_factory=lambda: os.environ.get("OPENAI_BASE_URL"))
+    judge_model: str | None = None
+    judge_base_url: str | None = None
     request_limit: int = 40
     timeout: float = 600.0
     wait_timeout: int = 180
@@ -183,7 +185,28 @@ def _build_parser() -> argparse.ArgumentParser:
             "Defaults to OPENAI_BASE_URL. Pair with an 'openai-chat:<served-model>' model string."
         ),
     )
-    _ = parser.add_argument("--request-limit", type=int, help="Max model requests per run.")
+    _ = parser.add_argument(
+        "--judge-model",
+        metavar="PROVIDER:MODEL",
+        help=(
+            "Run the ScopeJudge monitor on an independent model (needs --scopejudge), to vary "
+            "actor vs judge size/provider. Default: the judge shares the actor's --model. Its key "
+            "is read from the provider's env var; pass --judge-base-url for a self-hosted judge."
+        ),
+    )
+    _ = parser.add_argument(
+        "--judge-base-url",
+        metavar="URL",
+        help=(
+            "OpenAI-compatible endpoint for the judge when --judge-model is set. Not inherited "
+            "from --base-url, so a different-provider judge is not misrouted to the actor endpoint."
+        ),
+    )
+    _ = parser.add_argument(
+        "--request-limit",
+        type=int,
+        help="Max MODEL REQUESTS per run (not tool calls; one request may emit several).",
+    )
     _ = parser.add_argument("--timeout", type=float, help="Per-task agent time budget (s).")
     _ = parser.add_argument("--wait-timeout", type=int, help="Compose health wait (s).")
     _ = parser.add_argument(
@@ -474,6 +497,8 @@ def main(argv: list[str] | None = None) -> int:
         agent=args.agent,
         model=args.model,
         base_url=args.base_url,
+        judge_model=args.judge_model,
+        judge_base_url=args.judge_base_url,
         request_limit=args.request_limit,
         timeout=args.timeout,
         wait_timeout=args.wait_timeout,

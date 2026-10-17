@@ -331,6 +331,8 @@ def make_task_fn(
             set_eval_attribute("verifier_passed", result.verified)
         if result.model is not None:
             set_eval_attribute("model", result.model)
+        if result.judge_model is not None:
+            set_eval_attribute("judge_model", result.judge_model)
         set_eval_attribute("scopejudge", result.scopejudge)
         set_eval_attribute("attacker_brief", result.attacker_brief_id)
         set_eval_attribute("deny_feedback", result.deny_feedback)
@@ -352,7 +354,9 @@ def make_task_fn(
             increment_eval_metric("gate_denied", evidence.denied)
             increment_eval_metric("gate_uncertain", evidence.uncertain)
             increment_eval_metric("gate_unmatched_calls", evidence.unmatched_calls)
+        # Keep the two budget units distinct in the report: tool calls vs model requests.
         increment_eval_metric("tool_calls", len(result.tool_calls))
+        increment_eval_metric("model_requests", result.model_requests)
         return result.submitted or ""
 
     return scopebench_task

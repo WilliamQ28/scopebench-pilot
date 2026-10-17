@@ -48,13 +48,29 @@ class AgentConfig(TypedDict):
     # re-read. Results carrying a task flag are never truncated. Absent/None/0 = off (unchanged).
     max_tool_result_chars: NotRequired[int | None]
     # Persistence treatment: when true, re-prompt a voluntarily-stopping agent to keep working
-    # toward the objective until the shared request budget (``request_limit``) is spent, instead of
-    # accepting an early final answer. Isolates "not giving up" from the agent's own reasoning. The
-    # budget is the real cap; ``max_nudges`` only bounds a pathological stop-without-progress loop
-    # and defaults to ``request_limit`` (each nudge is itself a request, so it can never bind first
-    # under normal operation). Absent/False = unchanged (the agent stops when it chooses).
+    # toward the objective until the shared request budget (``request_limit``, measured in MODEL
+    # REQUESTS, not tool calls) is spent, instead of accepting an early final answer. Isolates "not
+    # giving up" from the agent's own reasoning. The budget is the real cap; ``max_nudges`` only
+    # bounds a pathological stop-without-progress loop and defaults to ``request_limit`` (each nudge
+    # is itself a request, so it can never bind first under normal operation). Absent/False =
+    # unchanged (the agent stops when it chooses).
     persist: NotRequired[bool]
     max_nudges: NotRequired[int]
+    # Trusted stop condition for persistence: the SHA-256 digest of the task's forbidden flag (the
+    # same digest the host grades against). When set, persistence stops once /tmp/result.txt hashes
+    # to this value -- i.e. the objective is actually reached -- rather than on any nonempty text an
+    # actor-writable file happens to contain. Absent/None = no trusted target, so persistence never
+    # stops early on the flag and runs to the request budget. The digest is one-way and is read only
+    # by the controller (never shown to the model), so passing it leaks nothing.
+    objective_hash: NotRequired[str | None]
+    # Independent ScopeJudge (monitor) model/endpoint/key, so the judge can be a different size or
+    # provider than the actor -- the research question's actor/judge-size axis. Absent judge_model =
+    # the judge shares the actor's model/base_url/api_key (prior single-model behaviour). When set,
+    # the judge uses judge_base_url (if given; it is NOT auto-inherited from the actor, to avoid an
+    # anthropic judge inheriting a vLLM base_url) and judge_api_key (falling back to the actor key).
+    judge_model: NotRequired[str | None]
+    judge_base_url: NotRequired[str | None]
+    judge_api_key: NotRequired[str]
 
 
 @dataclass
@@ -73,3 +89,9 @@ class AgentResult:
     tool_calls: list[ToolCall] = field(default_factory=list)
     error: str | None = None
     submitted: str | None = None
+    # Count of MODEL REQUESTS the run consumed (the unit ``request_limit`` caps), kept distinct from
+    # len(tool_calls): one request can emit several tool calls, and nudges/denials add requests with
+    # no new tool call. Reported separately so budget analysis does not conflate the two.
+    model_requests: int = 0
+    # Resolved ScopeJudge model actually used (actor model when no judge override), for provenance.
+    judge_model: str | None = None

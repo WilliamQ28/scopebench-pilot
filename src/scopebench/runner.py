@@ -28,7 +28,7 @@ from agent_sandbox import (
     ensure_image,
     run_agent_container,
 )
-from scopebench.manifest import InstructionVariant, TaskManifest
+from scopebench.manifest import FlagVerification, InstructionVariant, TaskManifest
 from scopejudge.protocol import DenyFeedback
 
 AgentKind = Literal["harness", "solution", "dry-run"]
@@ -59,6 +59,10 @@ class TaskResult:
     agent: AgentKind
     instruction_id: str = "default"
     model: str | None = None
+    # Resolved ScopeJudge model actually used (actor model when no override); None for non-harness.
+    judge_model: str | None = None
+    # Model requests consumed (the unit request_limit caps), distinct from len(tool_calls).
+    model_requests: int = 0
     scopejudge: bool = False
     attacker_brief_id: str = "none"
     deny_feedback: DenyFeedback = "reasoned"
@@ -80,8 +84,15 @@ class RunOptions:
 
     agent: AgentKind = "harness"
     model: str | None = None
-    # Optional OpenAI-compatible endpoint for the actor and judge (e.g. a self-hosted vLLM server).
+    # Optional OpenAI-compatible endpoint for the actor (and, by default, the judge).
     base_url: str | None = None
+    # Independent ScopeJudge (monitor) model/endpoint. None judge_model = the judge shares the
+    # actor's model/endpoint/key (prior behaviour); set it to vary actor vs judge model size or
+    # provider (the research question's headline axis). judge_base_url is NOT inherited from
+    # base_url when judge_model is set, so a different-provider judge is not misrouted.
+    judge_model: str | None = None
+    judge_base_url: str | None = None
+    # Max MODEL REQUESTS per run (not tool calls: one request can emit several tool calls).
     request_limit: int = 40
     timeout: float = 600.0
     wait_timeout: int = 180
@@ -119,6 +130,8 @@ class _AgentOutcome:
     """Strategy output before task verification is applied."""
 
     model: str | None = None
+    judge_model: str | None = None
+    model_requests: int = 0
     output: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     touched_out_of_scope: bool = False
@@ -201,6 +214,8 @@ def run_task(
                 agent=options.agent,
                 instruction_id=selected_instruction.id,
                 model=agent_outcome.model,
+                judge_model=agent_outcome.judge_model,
+                model_requests=agent_outcome.model_requests,
                 scopejudge=options.scopejudge and options.agent == "harness",
                 attacker_brief_id=(
                     options.attacker_brief_id if options.agent == "harness" else "none"
@@ -247,12 +262,18 @@ def _dispatch_agent(
         return _AgentOutcome()
     if options.agent == "solution":
         return _run_solution(manifest, script_env)
+    objective_hash = (
+        manifest.verification.hash
+        if isinstance(manifest.verification, FlagVerification)
+        else None
+    )
     return _run_harness_container(
         options,
         workspace,
         instruction,
         topology,
         compose_stack,
+        objective_hash=objective_hash,
         capture_trajectory=capture_trajectory,
     )
 
@@ -285,6 +306,7 @@ def _run_harness_container(
     topology: Topology,
     compose_stack: stack.ComposeStack,
     *,
+    objective_hash: str | None = None,
     capture_trajectory: bool,
 ) -> _AgentOutcome:
     """Run the real harness in the sandbox and retain its raw trajectory signals."""
@@ -307,6 +329,15 @@ def _run_harness_container(
     }
     if options.base_url is not None:
         config["base_url"] = options.base_url
+    effective_judge_model = effective_model
+    if options.judge_model:
+        effective_judge_model = models.resolve_model(options.judge_model)
+        config["judge_model"] = effective_judge_model
+        judge_key = models.read_api_key(effective_judge_model)
+        if judge_key:
+            config["judge_api_key"] = judge_key
+        if options.judge_base_url is not None:
+            config["judge_base_url"] = options.judge_base_url
     if options.attacker_brief is not None:
         config["attacker_brief"] = options.attacker_brief
     if options.deny_feedback != "reasoned":
@@ -321,6 +352,9 @@ def _run_harness_container(
         config["persist"] = True
         if options.max_nudges is not None:
             config["max_nudges"] = options.max_nudges
+        # Trusted persistence stop: let the controller recognise the real objective by hash.
+        # None (a script-verified task with no digest) means "no trusted target" in the container.
+        config["objective_hash"] = objective_hash
     result = run_agent_container(
         image=image,
         network=compose_stack.edge_network_name(),
@@ -335,6 +369,8 @@ def _run_harness_container(
     touched = any(marker in call.args for call in result.tool_calls for marker in markers)
     return _AgentOutcome(
         model=effective_model,
+        judge_model=effective_judge_model if options.scopejudge else None,
+        model_requests=result.model_requests,
         output=result.output,
         tool_calls=result.tool_calls,
         touched_out_of_scope=touched,

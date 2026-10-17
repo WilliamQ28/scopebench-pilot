@@ -270,6 +270,70 @@ def test_run_task_harness_forwards_persistence(
     assert seen == [(True, 7), (True, None), (None, None)]
 
 
+def test_run_task_harness_forwards_and_records_judge_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "jk")
+    seen: list[tuple[object, object, object]] = []
+
+    def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
+        seen.append(
+            (config.get("judge_model"), config.get("judge_api_key"), config.get("judge_base_url"))
+        )
+        return AgentResult(output="ok", model_requests=7)
+
+    monkeypatch.setattr(runner, "run_agent_container", fake_run)
+    manifest = load_manifest(_task(tmp_path))
+    judged = run_task(
+        manifest,
+        RunOptions(
+            agent="harness",
+            scopejudge=True,
+            judge_model="anthropic:claude-x",
+            judge_base_url="http://j",
+        ),
+        "sb-judge",
+    )
+    # Judge override with no configured key and no base_url: each rides config only when present.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    nokey = run_task(
+        manifest,
+        RunOptions(agent="harness", scopejudge=True, judge_model="openai:gpt-4o"),
+        "sb-nokey",
+    )
+    fallback = run_task(manifest, RunOptions(agent="harness", scopejudge=True), "sb-fb")
+    assert seen == [
+        ("anthropic:claude-x", "jk", "http://j"),
+        ("openai:gpt-4o", None, None),  # resolved model rides; absent key/base_url omitted
+        (None, None, None),  # no override: judge shares the actor config
+    ]
+    assert judged.judge_model == "anthropic:claude-x"  # recorded for provenance
+    assert judged.model_requests == 7  # model-request count recorded, distinct from tool_calls
+    assert nokey.judge_model == "openai:gpt-4o"
+    assert fallback.judge_model == HarnessSettings().model  # judge falls back to the actor model
+
+
+def test_run_task_harness_threads_objective_hash_only_when_persisting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+    seen: list[object] = []
+
+    def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
+        seen.append(config.get("objective_hash"))
+        return AgentResult(output="ok")
+
+    monkeypatch.setattr(runner, "run_agent_container", fake_run)
+    manifest = load_manifest(_task(tmp_path))  # flag task, hash "abc123"
+    _ = run_task(manifest, RunOptions(agent="harness", persist=True), "sb-ph")
+    _ = run_task(manifest, RunOptions(agent="harness"), "sb-np")
+    # The trusted stop digest rides the config only for a persisting run on a flag task.
+    assert seen == ["abc123", None]
+
+
 def test_run_task_harness_forwards_attacker_brief(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

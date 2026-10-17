@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import uuid
@@ -83,6 +84,19 @@ def test_build_model_openai_uses_responses_api() -> None:
     model = runtime._build_model(_cfg(model="openai:gpt-4o"))
     assert isinstance(model, OpenAIResponsesModel)
     assert model.model_name == "gpt-4o"
+
+
+def test_build_judge_model_falls_back_to_actor_when_unset() -> None:
+    # No judge override: the monitor runs on the actor's model (prior single-model behaviour).
+    assert runtime._build_judge_model(_cfg(model="anthropic:claude-x")).model_name == "claude-x"
+
+
+def test_build_judge_model_uses_independent_override() -> None:
+    cfg = _cfg(model="anthropic:claude-x")
+    cfg["judge_model"] = "openai:gpt-4o"
+    cfg["judge_api_key"] = "jk"
+    assert runtime._build_judge_model(cfg).model_name == "gpt-4o"  # judge uses its own model
+    assert runtime._build_model(cfg).model_name == "claude-x"  # actor model unchanged
 
 
 def test_build_model_openrouter_uses_native_provider() -> None:
@@ -473,6 +487,14 @@ async def test_run_agent_skips_trajectory_when_atif_disabled(tmp_path: Path) -> 
     assert not (tmp_path / "trajectory.json").exists()
 
 
+async def test_run_agent_reports_model_request_count(tmp_path: Path) -> None:
+    out = await runtime.run_agent(
+        _cfg(), model=_text_model("done"), deps=HarnessDeps(cwd=tmp_path)
+    )
+    # Model requests are tracked separately from tool calls (the unit request_limit caps).
+    assert out["model_requests"] >= 1
+
+
 async def test_trajectory_written_when_run_hits_request_limit(tmp_path: Path) -> None:
     # Budget exhaustion is a gradeable agent outcome: preserve its calls and partial trajectory
     # so the mechanical verifier and trajectory judge can still evaluate it.
@@ -550,8 +572,12 @@ async def test_persist_stops_once_objective_is_reached(
 ) -> None:
     calls: list[int] = []
     seen_nudge: list[bool] = []
+
     # The objective becomes "reached" after the first model response: one nudge, then stop.
-    monkeypatch.setattr(runtime, "_objective_reached", lambda: len(calls) >= 2)
+    def _reached_after_first(_hash: str | None) -> bool:
+        return len(calls) >= 2
+
+    monkeypatch.setattr(runtime, "_objective_reached", _reached_after_first)
     cfg = _cfg(request_limit=50)
     cfg["persist"] = True
     out = await runtime.run_agent(
@@ -562,24 +588,31 @@ async def test_persist_stops_once_objective_is_reached(
     assert len(calls) == 2
 
 
-async def test_objective_reached_reads_the_flag_contract(
+async def test_objective_reached_uses_trusted_hash_not_arbitrary_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     flag = tmp_path / "result.txt"
     monkeypatch.setattr(runtime, "_FLAG_SRC", flag)
-    assert runtime._objective_reached() is False  # absent flag: nothing reached
-    _ = flag.write_text("FLAG{reached}", encoding="utf-8")
-    assert runtime._objective_reached() is True
-    # With the flag already present, persistence never nudges.
+    digest = hashlib.sha256(b"FLAG{reached}").hexdigest()
+    assert runtime._objective_reached(digest) is False  # absent flag
+    assert runtime._objective_reached(None) is False  # no trusted target -> never stop early
+    _ = flag.write_text("FLAG{reached}\n", encoding="utf-8")
+    assert runtime._objective_reached(digest) is True  # correct flag matches the grading digest
+    assert runtime._objective_reached("00" * 32) is False  # wrong target digest
+    _ = flag.write_text("FLAG{wrong-or-junk}", encoding="utf-8")
+    assert runtime._objective_reached(digest) is False  # nonempty text that is NOT the objective
+    # End to end: with a trusted digest set but never produced, persistence runs to the budget
+    # rather than stopping on whatever text the actor-writable file holds.
+    monkeypatch.setattr(runtime, "_FLAG_SRC", tmp_path / "absent.txt")
     calls: list[int] = []
     seen_nudge: list[bool] = []
-    cfg = _cfg(request_limit=10)
+    cfg = _cfg(request_limit=3)
     cfg["persist"] = True
+    cfg["objective_hash"] = digest
     _ = await runtime.run_agent(
         cfg, model=_counting_text_model(calls, seen_nudge), deps=HarnessDeps(cwd=tmp_path)
     )
-    assert len(calls) == 1
-    assert not seen_nudge
+    assert len(calls) == 3
 
 
 async def test_persist_respects_max_nudges_cap(
