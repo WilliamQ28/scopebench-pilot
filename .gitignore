@@ -10,8 +10,9 @@ site/
 # Virtual environments
 .venv
 
-# Local env / secrets
+# Local env / secrets and machine-specific setup notes
 .env
+/SETUP_NOTES.md
 
 
 .pytest_cache/
@@ -31,6 +32,8 @@ site/
 # (the design doc and the runner), ignore the dated run-instance directories entirely.
 *-results/
 experiments/*/
+# Publish the reusable Docker validator while retaining ignored run-instance directories.
+!experiments/scopefirewall/
 # Ad-hoc run outputs that have accumulated at the repo root.
 /run-*.json
 /run-*.log

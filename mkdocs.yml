@@ -44,6 +44,9 @@ nav:
       - Run evaluations: scopebench/run-evaluations.md
       - Inspect results: scopebench/results.md
       - Troubleshoot: scopebench/troubleshooting.md
+  - Research extensions:
+      - Live gate evidence: scopebench/live-breach-evidence.md
+      - HTTP ScopeFirewall: scopebench/scopefirewall-http.md
   - Methodology:
       - Grading model: explanation/scopebench-grading.md
       - Architecture: explanation/architecture.md

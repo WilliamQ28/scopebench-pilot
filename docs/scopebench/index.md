@@ -48,3 +48,7 @@ For each task and instruction pair, the runner:
 
 Use [Quickstart](quickstart.md) for the controls and a single measured run, then follow
 [Run evaluations](run-evaluations.md) for the full pilot settings.
+
+The separate [HTTP ScopeFirewall experiment](scopefirewall-http.md) adds four live enforcement
+arms, adaptive rejection feedback, fixture-side effect evidence, and a Docker isolation validator.
+It is a bounded research prototype rather than part of the frozen pilot reproduction.
