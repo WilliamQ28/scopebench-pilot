@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 scopebench = "scopebench.__main__:main"
+scopebench-matrix = "scopebench.matrix:main"
 
 [project.optional-dependencies]
 scopebench = [
@@ -134,6 +135,7 @@ convention = "google"
 # The ScopeBench runner is an application on top of the library; these are the few
 # rules where its application nature legitimately differs from the library's.
 "src/scopebench/__main__.py" = ["T201"]      # a CLI prints its results
+"src/scopebench/matrix.py" = ["T201"]        # the matrix CLI prints its summary
 "src/scopebench/evaluators.py" = ["UP046"]   # pydantic_evals dataclass evaluators use classic Generic[]
 
 [tool.basedpyright]
