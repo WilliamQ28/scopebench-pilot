@@ -29,6 +29,8 @@ from agent_harness import (
     HarnessSettings,
     agent,
     all_tool_definitions,
+    create_agent,
+    select_toolsets,
     trajectory_from_messages,
 )
 from scopejudge.capability import ScopeJudge
@@ -227,12 +229,16 @@ async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _Ru
     # to the request budget so persistence is bounded only by the shared call budget.
     max_nudges = cfg.get("max_nudges") or request_limit
     objective_hash = cfg.get("objective_hash")
+    # Harness-capability axis: restrict the acting agent to the selected toolset groups, else use
+    # the shared default agent unchanged.
+    tool_ids = cfg.get("toolsets")
+    acting_agent = agent if tool_ids is None else create_agent(toolsets=select_toolsets(tool_ids))
     messages: list[ModelMessage] = []
     nudges = 0
     try:
         try:
             with capture_run_messages() as messages:
-                run = await agent.run(
+                run = await acting_agent.run(
                     _actor_prompt(cfg),
                     deps=deps,
                     usage=usage,
@@ -248,7 +254,7 @@ async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _Ru
                     for call in run.output.calls:
                         results.calls[call.tool_call_id] = reply
                     with capture_run_messages() as messages:
-                        run = await agent.run(
+                        run = await acting_agent.run(
                             message_history=run.all_messages(),
                             deferred_tool_results=results,
                             deps=deps,
@@ -267,7 +273,7 @@ async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _Ru
                 ):
                     nudges += 1
                     with capture_run_messages() as messages:
-                        run = await agent.run(
+                        run = await acting_agent.run(
                             _NUDGE_PROMPT.format(remaining=request_limit - usage.requests),
                             message_history=run.all_messages(),
                             deps=deps,

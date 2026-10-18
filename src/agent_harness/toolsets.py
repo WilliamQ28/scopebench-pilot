@@ -127,20 +127,58 @@ memory: FunctionToolset[HarnessDeps] = FunctionToolset(
     instructions=_MEMORY_INSTRUCTIONS,
 )
 
-# The ungated toolsets, in the order they attach to the agent.
-_BASE_TOOLSETS = (execution, filesystem, web, workflow, memory)
+# The selectable toolset groups, keyed by id in the order they attach to the agent. This is the
+# single source of truth for the reproducible tool-set-selection axis (the harness-capability
+# experimental variable): a run may restrict the agent to a subset of these groups.
+_BASE_BY_ID: dict[str, FunctionToolset[HarnessDeps]] = {
+    "execution": execution,
+    "filesystem": filesystem,
+    "web": web,
+    "workflow": workflow,
+    "memory": memory,
+}
+TOOLSET_IDS: tuple[str, ...] = tuple(_BASE_BY_ID)
 
-# Destructive toolsets are gated; the rest are attached directly.
-TOOLSETS: list[AbstractToolset[HarnessDeps]] = [
-    execution.approval_required(_needs_approval),
-    filesystem.approval_required(_needs_approval),
-    web,
-    workflow,
-    memory,
-]
+# The ungated toolsets, in attach order (kept for tests/introspection).
+_BASE_TOOLSETS = tuple(_BASE_BY_ID.values())
+
+# Destructive toolsets are gated with approval_required; the rest attach directly. Built once per id
+# so selection reuses the exact same instances the full default uses.
+_GATED_BY_ID: dict[str, AbstractToolset[HarnessDeps]] = {
+    "execution": execution.approval_required(_needs_approval),
+    "filesystem": filesystem.approval_required(_needs_approval),
+    "web": web,
+    "workflow": workflow,
+    "memory": memory,
+}
+
+# Default: every group, in canonical order.
+TOOLSETS: list[AbstractToolset[HarnessDeps]] = list(_GATED_BY_ID.values())
 
 # Every tool name the agent exposes (single source of truth for tests/introspection).
 ALL_TOOL_NAMES = frozenset(name for toolset in _BASE_TOOLSETS for name in toolset.tools)
+
+
+def select_toolsets(ids: list[str] | None) -> list[AbstractToolset[HarnessDeps]]:
+    """Return the gated toolsets for ``ids`` (canonical order), or all groups when ``ids`` is None.
+
+    Raises ValueError on an unknown id so a typo in the ``--tools`` selection fails loudly rather
+    than silently running with an unexpected tool set.
+    """
+    if ids is None:
+        return list(_GATED_BY_ID.values())
+    unknown = [i for i in ids if i not in _GATED_BY_ID]
+    if unknown:
+        known = ", ".join(TOOLSET_IDS)
+        raise ValueError(f"unknown toolset id(s): {', '.join(unknown)}; known ids: {known}")
+    chosen = set(ids)
+    return [_GATED_BY_ID[i] for i in TOOLSET_IDS if i in chosen]
+
+
+def tool_names_for(ids: list[str] | None) -> list[str]:
+    """Effective tool names exposed by the selected groups, in canonical order (for recording)."""
+    chosen = set(TOOLSET_IDS if ids is None else ids)
+    return [name for i in TOOLSET_IDS if i in chosen for name in _BASE_BY_ID[i].tools]
 
 
 def all_tool_definitions() -> list[ToolDefinition]:

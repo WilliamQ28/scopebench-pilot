@@ -334,6 +334,38 @@ def test_run_task_harness_threads_objective_hash_only_when_persisting(
     assert seen == ["abc123", None]
 
 
+def test_run_task_harness_forwards_and_records_toolsets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+    seen: list[object] = []
+
+    def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
+        seen.append(config.get("toolsets"))
+        return AgentResult(output="ok")
+
+    monkeypatch.setattr(runner, "run_agent_container", fake_run)
+    manifest = load_manifest(_task(tmp_path))
+    restricted = run_task(
+        manifest, RunOptions(agent="harness", toolsets=["web", "workflow"]), "sb-tr"
+    )
+    full = run_task(manifest, RunOptions(agent="harness"), "sb-full")
+    # The selection rides the config only when restricted; effective tool names are recorded.
+    assert seen == [["web", "workflow"], None]
+    assert set(restricted.tools) == {
+        "fetch",
+        "web_extract",
+        "think",
+        "todo",
+        "report",
+        "ask_user",
+        "confirm",
+    }
+    assert len(full.tools) == 23  # unrestricted = every tool
+    assert "bash" in full.tools
+
+
 def test_run_task_harness_forwards_attacker_brief(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

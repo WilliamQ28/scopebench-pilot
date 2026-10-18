@@ -71,6 +71,9 @@ class AgentConfig(TypedDict):
     judge_model: NotRequired[str | None]
     judge_base_url: NotRequired[str | None]
     judge_api_key: NotRequired[str]
+    # Harness-capability axis: restrict the acting agent to this subset of toolset-group ids (e.g.
+    # ["filesystem", "web"]). Absent/None = all groups (unchanged). An unknown id fails the run.
+    toolsets: NotRequired[list[str] | None]
 
 
 @dataclass

@@ -495,6 +495,16 @@ async def test_run_agent_reports_model_request_count(tmp_path: Path) -> None:
     assert out["model_requests"] >= 1
 
 
+async def test_run_agent_builds_restricted_agent_when_toolsets_selected(tmp_path: Path) -> None:
+    # Exercises the per-run restricted-agent path; behavioural restriction is proven in test_agent.
+    cfg = _cfg()
+    cfg["toolsets"] = ["workflow"]
+    out = await runtime.run_agent(
+        cfg, model=_text_model("done"), deps=HarnessDeps(cwd=tmp_path)
+    )
+    assert out["output"] == "done"
+
+
 async def test_trajectory_written_when_run_hits_request_limit(tmp_path: Path) -> None:
     # Budget exhaustion is a gradeable agent outcome: preserve its calls and partial trajectory
     # so the mechanical verifier and trajectory judge can still evaluate it.

@@ -18,6 +18,7 @@ import agent_sandbox.models as models
 import agent_sandbox.stack as stack
 import scopebench.render as render
 import scopebench.verify as verify
+from agent_harness import tool_names_for
 from agent_sandbox import (
     AgentConfig,
     Host,
@@ -63,6 +64,8 @@ class TaskResult:
     judge_model: str | None = None
     # Model requests consumed (the unit request_limit caps), distinct from len(tool_calls).
     model_requests: int = 0
+    # Effective tool availability for this run (names from the selected toolset groups).
+    tools: list[str] = field(default_factory=list)
     scopejudge: bool = False
     attacker_brief_id: str = "none"
     deny_feedback: DenyFeedback = "reasoned"
@@ -123,6 +126,9 @@ class RunOptions:
     # ``max_nudges`` bounds a degenerate stop-without-progress loop; None = default to the budget.
     persist: bool = False
     max_nudges: int | None = None
+    # Harness-capability axis: restrict the acting agent to this subset of toolset-group ids
+    # (agent_harness.TOOLSET_IDS). None = all groups (unchanged). Recorded as effective tool names.
+    toolsets: list[str] | None = None
 
 
 @dataclass
@@ -132,6 +138,7 @@ class _AgentOutcome:
     model: str | None = None
     judge_model: str | None = None
     model_requests: int = 0
+    tools: list[str] = field(default_factory=list)
     output: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     touched_out_of_scope: bool = False
@@ -216,6 +223,7 @@ def run_task(
                 model=agent_outcome.model,
                 judge_model=agent_outcome.judge_model,
                 model_requests=agent_outcome.model_requests,
+                tools=agent_outcome.tools,
                 scopejudge=options.scopejudge and options.agent == "harness",
                 attacker_brief_id=(
                     options.attacker_brief_id if options.agent == "harness" else "none"
@@ -355,6 +363,8 @@ def _run_harness_container(
         # Trusted persistence stop: let the controller recognise the real objective by hash.
         # None (a script-verified task with no digest) means "no trusted target" in the container.
         config["objective_hash"] = objective_hash
+    if options.toolsets is not None:
+        config["toolsets"] = options.toolsets
     result = run_agent_container(
         image=image,
         network=compose_stack.edge_network_name(),
@@ -371,6 +381,7 @@ def _run_harness_container(
         model=effective_model,
         judge_model=effective_judge_model if options.scopejudge else None,
         model_requests=result.model_requests,
+        tools=tool_names_for(options.toolsets),
         output=result.output,
         tool_calls=result.tool_calls,
         touched_out_of_scope=touched,

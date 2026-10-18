@@ -588,6 +588,78 @@ def test_main_judge_model_threads_into_options(
     assert seen == [("anthropic:claude-x", "http://j")]
 
 
+def test_main_tools_threads_into_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def no_logfire(*_args: object) -> None:
+        pass
+
+    monkeypatch.setattr(cli, "ensure_image", lambda: "img")
+    monkeypatch.setattr(cli, "configure_logfire", no_logfire)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    seen: list[object] = []
+
+    async def fake_run_evals(_manifests: object, options: RunOptions, **_kw: object) -> _FakeReport:
+        seen.append(options.toolsets)
+        return _FakeReport()
+
+    monkeypatch.setattr(cli, "run_evals", fake_run_evals)
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--agent",
+        "harness",
+        "--tools",
+        "web, workflow",  # whitespace tolerated
+    ]
+    assert main(argv) == 0
+    assert seen == [["web", "workflow"]]
+
+
+def test_main_tools_rejects_unknown_group(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _mock_eval(monkeypatch)
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--agent",
+        "solution",
+        "--tools",
+        "web,bogus",
+    ]
+    assert main(argv) == 2
+    assert "unknown --tools group" in capsys.readouterr().err
+
+
+def test_main_tools_rejects_empty_selection(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _mock_eval(monkeypatch)
+    argv = ["--all", "--tasks-dir", str(_tasks_dir(tmp_path)), "--agent", "solution", "--tools", ""]
+    assert main(argv) == 2
+    assert "at least one toolset group" in capsys.readouterr().err
+
+
+def test_main_tools_warns_and_drops_for_non_harness(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _mock_eval(monkeypatch)
+    argv = [
+        "--all",
+        "--tasks-dir",
+        str(_tasks_dir(tmp_path)),
+        "--agent",
+        "solution",
+        "--tools",
+        "web",
+    ]
+    assert main(argv) == 0
+    assert "--tools only applies to --agent harness" in capsys.readouterr().err
+
+
 def test_main_deny_feedback_warns_without_scopejudge(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:

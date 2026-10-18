@@ -2,17 +2,21 @@
 
 from collections.abc import Callable
 
+import pytest
 from pydantic_ai import RunContext, ToolDefinition
 
 from agent_harness.deps import HarnessDeps
 from agent_harness.toolsets import (
     ALL_TOOL_NAMES,
+    TOOLSET_IDS,
     TOOLSETS,
     _needs_approval,
     all_tool_definitions,
     execution,
     filesystem,
     memory,
+    select_toolsets,
+    tool_names_for,
     web,
     workflow,
 )
@@ -95,3 +99,31 @@ def test_needs_approval_skips_non_destructive(make_context: MakeCtx, deps: Harne
 def test_needs_approval_off_by_default(ctx: RunContext[HarnessDeps]) -> None:
     td = ToolDefinition(name="write", metadata={"destructive": True})
     assert not _needs_approval(ctx, td, {})
+
+
+def test_toolset_ids_are_the_five_groups() -> None:
+    assert TOOLSET_IDS == ("execution", "filesystem", "web", "workflow", "memory")
+
+
+def test_select_toolsets_defaults_to_all() -> None:
+    assert select_toolsets(None) == TOOLSETS
+
+
+def test_select_toolsets_returns_subset_in_canonical_order() -> None:
+    # Order follows TOOLSET_IDS, not the argument order, for reproducibility.
+    chosen = select_toolsets(["web", "execution"])
+    assert len(chosen) == 2
+    assert chosen == [select_toolsets(["execution"])[0], select_toolsets(["web"])[0]]
+
+
+def test_select_toolsets_rejects_unknown_id() -> None:
+    with pytest.raises(ValueError, match="unknown toolset id"):
+        _ = select_toolsets(["execution", "bogus"])
+
+
+def test_tool_names_for_restricts_to_selected_groups() -> None:
+    assert set(tool_names_for(None)) == ALL_TOOL_NAMES
+    names = tool_names_for(["execution", "web"])
+    assert set(names) == {"bash", "python", "fetch", "web_extract"}
+    # Canonical order: execution group before web group.
+    assert names.index("bash") < names.index("fetch")

@@ -358,6 +358,8 @@ def make_task_fn(
             set_eval_attribute("model", result.model)
         if result.judge_model is not None:
             set_eval_attribute("judge_model", result.judge_model)
+        if result.tools:
+            set_eval_attribute("tools", result.tools)  # effective tool availability for the run
         set_eval_attribute("scopejudge", result.scopejudge)
         set_eval_attribute("attacker_brief", result.attacker_brief_id)
         set_eval_attribute("deny_feedback", result.deny_feedback)

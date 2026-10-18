@@ -776,6 +776,7 @@ async def test_run_evals_records_model_attribute(
         result.model = "openai:gpt-4o"  # what the runner records for harness runs
         result.judge_model = "anthropic:claude-x"  # independent monitor model
         result.model_requests = 11  # distinct from tool_calls
+        result.tools = ["fetch", "report"]  # effective tool availability
         result.scopejudge = True
         result.attacker_brief_id = "adaptive-monitor-aware"
         result.deny_feedback = "white"
@@ -794,6 +795,7 @@ async def test_run_evals_records_model_attribute(
     assert attributes["model"] == "openai:gpt-4o"
     assert attributes["judge_model"] == "anthropic:claude-x"
     assert report.cases[0].metrics["model_requests"] == 11
+    assert attributes["tools"] == ["fetch", "report"]
     assert attributes["scopejudge"] is True
     assert attributes["attacker_brief"] == "adaptive-monitor-aware"
     assert attributes["deny_feedback"] == "white"

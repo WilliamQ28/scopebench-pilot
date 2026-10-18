@@ -35,7 +35,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from agent_harness import HarnessSettings
+from agent_harness import TOOLSET_IDS, HarnessSettings
 from agent_sandbox import ImageError, ensure_image
 from agent_sandbox.models import (
     SANDBOX_PROVIDERS,
@@ -102,6 +102,7 @@ class _Args(argparse.Namespace):
     hide_brief_from_judge: bool = False
     persist: bool = False
     max_nudges: int | None = None
+    tools: str | None = None
     workspace_root: Path = field(default_factory=lambda: Path.cwd() / ".scopebench-runs")
 
 
@@ -315,6 +316,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     _ = parser.add_argument(
+        "--tools",
+        metavar="IDS",
+        help=(
+            "Restrict the acting agent to a comma-separated subset of toolset groups (harness "
+            f"capability axis). Groups: {', '.join(TOOLSET_IDS)}. Default: all. Recorded as the "
+            "effective tool availability."
+        ),
+    )
+    _ = parser.add_argument(
         "--workspace-root",
         type=Path,
         help="Where per-task agent workspaces are created.",
@@ -481,6 +491,27 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
+    toolsets_selection: list[str] | None = None
+    if args.tools is not None:
+        toolsets_selection = [t.strip() for t in args.tools.split(",") if t.strip()]
+        if not toolsets_selection:
+            print("error: --tools needs at least one toolset group.", file=sys.stderr)
+            return 2
+        unknown = [t for t in toolsets_selection if t not in TOOLSET_IDS]
+        if unknown:
+            print(
+                f"error: unknown --tools group(s) {', '.join(unknown)}; "
+                + f"choose from {', '.join(TOOLSET_IDS)}.",
+                file=sys.stderr,
+            )
+            return 2
+        if args.agent != "harness":
+            print(
+                f"warning: --tools only applies to --agent harness; ignoring it for {args.agent}.",
+                file=sys.stderr,
+            )
+            toolsets_selection = None
+
     if args.agent == "harness":
         # Build the sandbox image once, up front, so a build failure surfaces immediately (and
         # per-task runs reuse it rather than racing to rebuild under --concurrency).
@@ -517,6 +548,7 @@ def main(argv: list[str] | None = None) -> int:
         hide_brief_from_judge=args.hide_brief_from_judge,
         persist=args.persist,
         max_nudges=args.max_nudges,
+        toolsets=toolsets_selection,
     )
 
     configure_logfire(args.logfire)

@@ -6,7 +6,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.native_tools import AbstractNativeTool
 
-from agent_harness import HarnessSettings, agent, create_agent
+from agent_harness import HarnessSettings, agent, create_agent, select_toolsets
 from agent_harness.deps import HarnessDeps
 from agent_harness.toolsets import ALL_TOOL_NAMES
 
@@ -78,3 +78,19 @@ def test_no_native_tools_requested(deps: HarnessDeps) -> None:
     result = agent.run_sync("go", deps=deps, model=FunctionModel(capture))
     assert result.output == "done"
     assert seen == [[]]
+
+
+def test_create_agent_restricts_to_selected_toolsets(deps: HarnessDeps) -> None:
+    # A restricted agent exposes ONLY the selected groups' tools to the model.
+    seen: list[set[str]] = []
+
+    def capture(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        seen.append({t.name for t in info.model_request_parameters.function_tools})
+        return ModelResponse(parts=[TextPart("done")])
+
+    restricted = create_agent(toolsets=select_toolsets(["web", "workflow"]))
+    result = restricted.run_sync("go", deps=deps, model=FunctionModel(capture))
+    assert result.output == "done"
+    exposed = seen[0]
+    assert {"fetch", "web_extract", "report", "think"} <= exposed  # selected groups present
+    assert not ({"bash", "python", "read", "write", "save_memory"} & exposed)  # others excluded
