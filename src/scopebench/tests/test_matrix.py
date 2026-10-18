@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import ClassVar, cast
 
 import pytest
 
 from scopebench import matrix
 from scopebench.matrix import (
     Arm,
+    ExecResult,
+    MatrixMismatchError,
     MatrixSpec,
     ResolvedRun,
     build_executor,
@@ -23,7 +26,7 @@ from scopebench.matrix import (
 )
 from scopebench.runner import RunOptions
 
-_Executor = Callable[[ResolvedRun, Path], Path | None]
+_Executor = Callable[[ResolvedRun, Path], ExecResult]
 
 _SPEC_YAML = """
 name: smoke
@@ -71,6 +74,13 @@ def test_load_spec_rejects_unknown_field(tmp_path: Path) -> None:
         _ = load_spec(path)
 
 
+def test_spec_rejects_duplicate_arm_names() -> None:
+    with pytest.raises(ValueError, match="duplicate arm name"):
+        _ = MatrixSpec.model_validate(
+            {"name": "m", "panel": ["t"], "arms": [{"name": "a"}, {"name": "a"}]}
+        )
+
+
 def test_resolve_options_merges_defaults_then_arm() -> None:
     spec = MatrixSpec.model_validate(
         {
@@ -86,6 +96,16 @@ def test_resolve_options_merges_defaults_then_arm() -> None:
     assert options.persist is True
     assert config["request_limit"] == 150
     assert config["scopejudge"] is True
+
+
+def test_resolve_options_config_is_fully_effective_not_sparse() -> None:
+    # An arm relying on RunOptions defaults is still fully described in the ledger config.
+    spec = MatrixSpec.model_validate({"name": "m", "panel": ["t"], "arms": [{"name": "a"}]})
+    _options, config = resolve_options(spec, spec.arms[0])
+    assert config["request_limit"] == 40  # the RunOptions default, recorded (not omitted)
+    assert config["timeout"] == 600.0
+    assert config["deny_feedback"] == "reasoned"
+    assert "attacker_brief_sha256" not in config  # no brief -> no hash
 
 
 def test_resolve_options_maps_instruction_and_brief(tmp_path: Path) -> None:
@@ -120,6 +140,7 @@ def test_resolve_options_maps_every_field(tmp_path: Path) -> None:
                     "base_url": "http://a",
                     "judge_model": "anthropic:claude-x",
                     "judge_base_url": "http://j",
+                    "judge_timeout": 90.0,
                     "scopejudge": True,
                     "deny_feedback": "white",
                     "hide_brief_from_judge": True,
@@ -140,6 +161,7 @@ def test_resolve_options_maps_every_field(tmp_path: Path) -> None:
     assert o.base_url == "http://a"
     assert o.judge_model == "anthropic:claude-x"
     assert o.judge_base_url == "http://j"
+    assert o.judge_timeout == 90.0
     assert o.scopejudge is True
     assert o.deny_feedback == "white"
     assert o.hide_brief_from_judge is True
@@ -153,6 +175,7 @@ def test_resolve_options_maps_every_field(tmp_path: Path) -> None:
     assert o.attacker_brief == "B"
     assert o.attacker_brief_id == "b"
     assert cfg["tools"] == ["web", "workflow"]  # the resolved config records the selection
+    assert cfg["attacker_brief_sha256"] == hashlib.sha256(b"B").hexdigest()  # brief frozen by hash
 
 
 def test_resolve_options_arm_can_clear_a_default() -> None:
@@ -217,9 +240,9 @@ def test_code_revision_handles_success_and_missing_git(monkeypatch: pytest.Monke
 
 
 def _fake_execute(calls: list[str]) -> _Executor:
-    def execute(run: ResolvedRun, _out: Path) -> Path | None:
+    def execute(run: ResolvedRun, _out: Path) -> ExecResult:
         calls.append(run.run_id)
-        return Path(f"{run.run_id}.json")
+        return ExecResult(report=Path(f"{run.run_id}.json"), cases=1, failures=0, expected=1)
 
     return execute
 
@@ -238,10 +261,10 @@ def test_run_matrix_executes_all_and_records_ledger(tmp_path: Path) -> None:
 
 
 def test_run_matrix_records_errors_without_aborting(tmp_path: Path) -> None:
-    def execute(run: ResolvedRun, _out: Path) -> Path | None:
+    def execute(run: ResolvedRun, _out: Path) -> ExecResult:
         if run.task == "task-a":
             raise RuntimeError("boom")
-        return None
+        return ExecResult(report=Path("r.json"), cases=1, failures=0, expected=1)
 
     ledger = run_matrix(_spec(), tmp_path, execute=execute, revision="r", now=lambda: "T")
     statuses = {rid: rec.status for rid, rec in ledger.runs.items()}
@@ -250,23 +273,59 @@ def test_run_matrix_records_errors_without_aborting(tmp_path: Path) -> None:
     assert statuses["a1__task-b__r1"] == "completed"  # a later unit still ran
 
 
+def test_run_matrix_marks_failed_or_empty_report_as_error(tmp_path: Path) -> None:
+    # A report with no graded cases / failures must NOT be marked completed (so resume reruns).
+    def execute(_run: ResolvedRun, _out: Path) -> ExecResult:
+        return ExecResult(report=Path("r.json"), cases=0, failures=1, expected=1)
+
+    ledger = run_matrix(_spec(), tmp_path, execute=execute, revision="r", now=lambda: "T")
+    rec = ledger.runs["a1__task-a__r1"]
+    assert rec.status == "error"
+    assert rec.failures == 1
+    assert rec.expected == 1
+    assert "incomplete" in (rec.error or "")
+
+
 def test_run_matrix_resumes_without_rerunning_completed(tmp_path: Path) -> None:
     calls1: list[str] = []
     _ = run_matrix(_spec(), tmp_path, execute=_fake_execute(calls1), revision="r", now=lambda: "T")
     assert len(calls1) == 8
-    # Re-run: everything is completed, so nothing executes again and evidence is preserved.
+    # Re-run with the SAME spec+revision: everything is completed, so nothing re-executes.
     calls2: list[str] = []
     ledger = run_matrix(
-        _spec(), tmp_path, execute=_fake_execute(calls2), revision="r2", now=lambda: "T2"
+        _spec(), tmp_path, execute=_fake_execute(calls2), revision="r", now=lambda: "T2"
     )
     assert calls2 == []  # no re-execution
-    assert ledger.code_revision == "r"  # original provenance preserved, not overwritten
+    assert ledger.code_revision == "r"  # original provenance preserved
+
+
+def test_run_matrix_rejects_revision_mismatch_on_resume(tmp_path: Path) -> None:
+    _ = run_matrix(_spec(), tmp_path, execute=_fake_execute([]), revision="r1", now=lambda: "T")
+    with pytest.raises(MatrixMismatchError, match="code revision"):
+        _ = run_matrix(_spec(), tmp_path, execute=_fake_execute([]), revision="r2", now=lambda: "T")
+
+
+def test_run_matrix_rejects_spec_mismatch_on_resume(tmp_path: Path) -> None:
+    # Same out dir, different spec (repeat changed) -> incompatible, must not silently reuse.
+    _ = run_matrix(
+        _spec(repeat=2), tmp_path, execute=_fake_execute([]), revision="r", now=lambda: "T"
+    )
+    with pytest.raises(MatrixMismatchError, match="different matrix spec"):
+        _ = run_matrix(
+            _spec(repeat=1), tmp_path, execute=_fake_execute([]), revision="r", now=lambda: "T"
+        )
 
 
 def test_build_executor_runs_pipeline_and_saves_report(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     seen: dict[str, object] = {}
+
+    class _Variant:
+        id: str = "program-brief-v3"
+
+    class _Manifest:
+        instruction_variants: ClassVar[list[_Variant]] = [_Variant()]
 
     async def fake_run_evals(
         manifests: list[object], options: RunOptions, **_kw: object
@@ -275,11 +334,12 @@ def test_build_executor_runs_pipeline_and_saves_report(
         seen["workspace_root"] = options.workspace_root
         return object()
 
-    def fake_load_manifest(task_dir: Path) -> str:
-        return f"manifest:{task_dir.name}"
+    def fake_load_manifest(task_dir: Path) -> _Manifest:
+        seen["task_dir"] = task_dir
+        return _Manifest()
 
     def fake_report_to_json(_report: object) -> dict[str, object]:
-        return {"cases": []}
+        return {"cases": [{"name": "c1"}], "failures": []}  # one graded case, no failures
 
     monkeypatch.setattr(matrix, "load_manifest", fake_load_manifest)
     monkeypatch.setattr(matrix, "run_evals", fake_run_evals)
@@ -291,16 +351,18 @@ def test_build_executor_runs_pipeline_and_saves_report(
         arm="a",
         task="task-x",
         rep=1,
-        options=RunOptions(agent="harness"),
+        options=RunOptions(agent="harness"),  # no instruction filter -> all variants expected
         config={},
     )
     out = tmp_path / "out"
     out.mkdir()
-    report_path = execute(run, out)
-    assert report_path is not None
-    assert report_path == out / "a__t__r1.json"
-    assert json.loads(report_path.read_text(encoding="utf-8")) == {"cases": []}
-    assert seen["manifests"] == ["manifest:task-x"]
+    result = execute(run, out)
+    assert result.report == out / "a__t__r1.json"
+    assert result.cases == 1
+    assert result.failures == 0
+    assert result.expected == 1  # one instruction variant
+    assert result.ok
+    assert str(seen["task_dir"]).endswith("tasks/task-x")
     assert str(seen["workspace_root"]).endswith("workspaces/a__t__r1")
 
 
@@ -311,8 +373,8 @@ def test_main_runs_matrix_and_writes_ledger(
     _ = spec_path.write_text(_SPEC_YAML, encoding="utf-8")
 
     def fake_build(_tasks_dir: Path) -> _Executor:
-        def execute(run: ResolvedRun, out: Path) -> Path | None:
-            return out / f"{run.run_id}.json"
+        def execute(run: ResolvedRun, out: Path) -> ExecResult:
+            return ExecResult(report=out / f"{run.run_id}.json", cases=1, failures=0, expected=1)
 
         return execute
 
@@ -329,7 +391,7 @@ def test_main_returns_nonzero_on_errors(monkeypatch: pytest.MonkeyPatch, tmp_pat
     _ = spec_path.write_text(_SPEC_YAML, encoding="utf-8")
 
     def fake_build(_tasks_dir: Path) -> _Executor:
-        def execute(_run: ResolvedRun, _out: Path) -> Path | None:
+        def execute(_run: ResolvedRun, _out: Path) -> ExecResult:
             raise RuntimeError("boom")
 
         return execute

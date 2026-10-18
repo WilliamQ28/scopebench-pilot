@@ -23,6 +23,11 @@ defaults:
   instruction: program-brief-v3
   scopejudge: true
   judge_model: openai-chat:qwen35-122b   # same-size self-judge baseline
+  # A judge model does NOT inherit --base-url, so the self-hosted judge needs its endpoint set
+  # explicitly here, or it would not reach the Vulcan server. Likewise set a long judge timeout:
+  # the slow endpoint times out (and fails closed) at the 30s default.
+  judge_base_url: https://inference.vulcan.alliancecan.ca/v1
+  judge_timeout: 120
   deny_feedback: reasoned
   hide_brief_from_judge: true
   request_limit: 150
@@ -39,9 +44,11 @@ arms:
     persist: true
 
   # Does a LARGER monitor hold where the same-size one failed? (actor/judge size axis)
+  # A different-provider judge: clear the Vulcan endpoint (null) so it uses Anthropic's API, and
+  # set ANTHROPIC_API_KEY. judge_timeout is inherited from defaults.
   - name: adaptive-vs-large-judge
     judge_model: anthropic:claude-x
-    judge_base_url: ""   # set to the judge provider's endpoint, or omit for the provider default
+    judge_base_url: null
 
   # Capability floor with no monitor (attack ceiling).
   - name: gate-off

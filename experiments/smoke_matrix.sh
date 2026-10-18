@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Reproducible OFFLINE smoke matrix: validates discovery + orchestration + that the new
-# experimental axes are accepted end to end, with NO model calls (--agent dry-run) and NO paid
-# or long-running work. Behavioural correctness of the new controls is covered by the unit tests
-# (pytest); this confirms the CLI/report wiring on a small panel.
+# Reproducible OFFLINE smoke: validates discovery + orchestration + that the new experimental axes
+# are ACCEPTED by the CLI, with NO model calls (--agent dry-run) and NO paid/long work.
+#
+# LIMITATION: dry-run does not call a model, so it does NOT exercise live judge separation,
+# persistence, or the gate end to end -- those are covered by the pytest unit tests. This script
+# only checks that each cell parses, orchestrates, and produces a well-formed report with graded
+# cases and no failures.
 #
 #   bash experiments/smoke_matrix.sh
 #
@@ -21,8 +24,11 @@ check() {  # name, json-path
   if .venv/bin/python - "$json" <<'PY'
 import json, sys
 rep = json.load(open(sys.argv[1]))
-assert rep["cases"] or rep["failures"], "no cases"
-print(f"  ok: {len(rep['cases'])} cases, {len(rep['failures'])} failures")
+cases, failures = rep["cases"], rep["failures"]
+# A dry-run cell must produce graded cases and NO failures; an all-failure report is NOT a pass.
+assert cases, "no graded cases"
+assert not failures, f"{len(failures)} failure(s) in report"
+print(f"  ok: {len(cases)} cases, 0 failures")
 PY
   then echo "PASS $name"; else echo "FAIL $name"; fail=1; fi
 }

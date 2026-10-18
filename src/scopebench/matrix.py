@@ -15,6 +15,7 @@ all testable offline with no model calls. :func:`build_executor` wires the real
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import random
 import subprocess
@@ -25,12 +26,16 @@ from pathlib import Path
 from typing import ClassVar, Literal, cast
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scopebench.evals import report_to_json, run_evals
 from scopebench.manifest import load_manifest
 from scopebench.runner import RunOptions
 from scopejudge.protocol import DenyFeedback
+
+
+class MatrixMismatchError(RuntimeError):
+    """A resume was attempted against a ledger from a different spec or code revision."""
 
 
 class ArmSettings(BaseModel):
@@ -42,6 +47,7 @@ class ArmSettings(BaseModel):
     base_url: str | None = None
     judge_model: str | None = None
     judge_base_url: str | None = None
+    judge_timeout: float | None = None
     scopejudge: bool | None = None
     deny_feedback: DenyFeedback | None = None
     hide_brief_from_judge: bool | None = None
@@ -73,6 +79,16 @@ class MatrixSpec(BaseModel):
     ordering: Literal["sequential", "interleaved", "random"] = "sequential"
     seed: int = 0
     defaults: ArmSettings = Field(default_factory=ArmSettings)
+
+    @field_validator("arms")
+    @classmethod
+    def _unique_arm_names(cls, arms: list[Arm]) -> list[Arm]:
+        """Reject duplicate arm names: they would collide into identical, overwriting run ids."""
+        names = [arm.name for arm in arms]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"duplicate arm name(s): {', '.join(duplicates)}; must be unique")
+        return arms
 
 
 @dataclass(frozen=True)
@@ -117,6 +133,8 @@ def resolve_options(spec: MatrixSpec, arm: Arm) -> tuple[RunOptions, dict[str, o
         options.judge_model = merged.judge_model
     if merged.judge_base_url is not None:
         options.judge_base_url = merged.judge_base_url
+    if merged.judge_timeout is not None:
+        options.judge_timeout = merged.judge_timeout
     if merged.scopejudge is not None:
         options.scopejudge = merged.scopejudge
     if merged.deny_feedback is not None:
@@ -141,7 +159,39 @@ def resolve_options(spec: MatrixSpec, arm: Arm) -> tuple[RunOptions, dict[str, o
         brief_path = Path(merged.attacker_brief)
         options.attacker_brief = brief_path.read_text(encoding="utf-8")
         options.attacker_brief_id = brief_path.stem
-    return options, merged.model_dump(exclude_none=True)
+    return options, _effective_config(options)
+
+
+def _effective_config(options: RunOptions) -> dict[str, object]:
+    """The FULLY RESOLVED effective settings for the ledger (incl. RunOptions defaults).
+
+    Records what the run will actually use -- not only the fields an arm/defaults set -- so an arm
+    relying on defaults is still fully described. Freezes the attacker brief by content hash so a
+    later edit to the brief file is detectable.
+    """
+    config: dict[str, object] = {
+        "model": options.model,
+        "base_url": options.base_url,
+        "judge_model": options.judge_model,
+        "judge_base_url": options.judge_base_url,
+        "judge_timeout": options.judge_timeout,
+        "scopejudge": options.scopejudge,
+        "deny_feedback": options.deny_feedback,
+        "hide_brief_from_judge": options.hide_brief_from_judge,
+        "persist": options.persist,
+        "max_nudges": options.max_nudges,
+        "request_limit": options.request_limit,
+        "timeout": options.timeout,
+        "max_tool_result_chars": options.max_tool_result_chars,
+        "tools": options.toolsets,
+        "instruction_id": options.instruction_id,
+        "attacker_brief_id": options.attacker_brief_id,
+    }
+    if options.attacker_brief is not None:
+        config["attacker_brief_sha256"] = hashlib.sha256(
+            options.attacker_brief.encode()
+        ).hexdigest()
+    return config
 
 
 def plan(spec: MatrixSpec) -> list[ResolvedRun]:
@@ -205,6 +255,25 @@ class RunRecord(BaseModel):
     ended: str | None = None
     report: str | None = None
     error: str | None = None
+    # Graded-outcome evidence recorded so "completed" is defensible (see ExecResult.ok).
+    cases: int = 0
+    failures: int = 0
+    expected: int = 0
+
+
+@dataclass
+class ExecResult:
+    """What an executor reports back: the saved report plus the counts that gate completion."""
+
+    report: Path | None = None
+    cases: int = 0
+    failures: int = 0
+    expected: int = 0
+
+    @property
+    def ok(self) -> bool:
+        """A run counts as completed only if it graded every expected case with no failures."""
+        return self.expected > 0 and self.cases == self.expected and self.failures == 0
 
 
 @dataclass
@@ -218,32 +287,44 @@ class Ledger:
     path: Path
 
     def save(self) -> None:
-        """Write the ledger to disk (called after every status change, so it is crash-safe)."""
+        """Atomically write the ledger (temp file + os.replace), so a crash cannot truncate it."""
         payload = {
             "spec": self.spec,
             "code_revision": self.code_revision,
             "created": self.created,
             "runs": {rid: rec.model_dump() for rid, rec in self.runs.items()},
         }
-        _ = self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        _ = tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        _ = tmp.replace(self.path)  # atomic on POSIX/NTFS: readers see old or new, never partial
 
     @classmethod
     def load_or_init(
         cls, out_dir: Path, spec: MatrixSpec, units: list[ResolvedRun], *, revision: str, now: str
     ) -> Ledger:
-        """Load an existing ledger (preserving completed evidence) or start a fresh one."""
+        """Load an existing ledger (preserving completed evidence) or start a fresh one.
+
+        A resume is only valid when the stored spec AND code revision match the current run; a
+        mismatch raises :class:`MatrixMismatchError` rather than silently reusing incompatible
+        results. Start a new ``--out`` directory (or restore the revision) to proceed.
+        """
         path = out_dir / "ledger.json"
         if path.is_file():
             raw = cast("dict[str, object]", json.loads(path.read_text(encoding="utf-8")))
+            stored_spec = cast("dict[str, object]", raw["spec"])
+            stored_revision = cast("str", raw["code_revision"])
+            if stored_spec != spec.model_dump(mode="json"):
+                raise MatrixMismatchError(
+                    f"{path} was created for a different matrix spec; use a new --out directory"
+                )
+            if stored_revision != revision:
+                raise MatrixMismatchError(
+                    f"{path} was created at code revision {stored_revision}, not {revision}; use a "
+                    + "new --out directory or check out that revision to resume"
+                )
             raw_runs = cast("dict[str, object]", raw.get("runs", {}))
             runs = {rid: RunRecord.model_validate(rec) for rid, rec in raw_runs.items()}
-            ledger = cls(
-                cast("dict[str, object]", raw["spec"]),
-                cast("str", raw["code_revision"]),
-                cast("str", raw["created"]),
-                runs,
-                path,
-            )
+            ledger = cls(stored_spec, stored_revision, cast("str", raw["created"]), runs, path)
         else:
             ledger = cls(spec.model_dump(mode="json"), revision, now, {}, path)
         # Add any planned units the ledger has not seen yet, as pending; never touch existing ones.
@@ -257,14 +338,17 @@ def run_matrix(
     spec: MatrixSpec,
     out_dir: Path,
     *,
-    execute: Callable[[ResolvedRun, Path], Path | None],
+    execute: Callable[[ResolvedRun, Path], ExecResult],
     revision: str | None = None,
     now: Callable[[], str] = _utcnow,
 ) -> Ledger:
     """Execute (or resume) the matrix, recording status in a crash-safe ledger.
 
-    ``execute(run, out_dir) -> report path | None`` runs one unit. Completed units are skipped and
-    their evidence is preserved; the ledger is written after every status change.
+    ``execute(run, out_dir) -> ExecResult`` runs one unit; a unit is marked ``completed`` only when
+    its result is :attr:`ExecResult.ok` (every expected case graded, no failures) -- a report that
+    is empty or carries infrastructure failures becomes ``error``, so a failed run is never skipped
+    on resume. Completed units are skipped and their evidence is preserved; the ledger is written
+    after every status change.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     units = plan(spec)
@@ -280,29 +364,57 @@ def run_matrix(
         record.started = now()
         ledger.save()
         try:
-            report = execute(run, out_dir)
+            result = execute(run, out_dir)
         except Exception as exc:  # noqa: BLE001 - one unit's failure must not abort the matrix
             record.status = "error"
             record.error = f"{type(exc).__name__}: {exc}"
         else:
-            record.status = "completed"
-            record.report = str(report) if report is not None else None
+            record.report = str(result.report) if result.report is not None else None
+            record.cases, record.failures, record.expected = (
+                result.cases,
+                result.failures,
+                result.expected,
+            )
+            if result.ok:
+                record.status = "completed"
+            else:
+                record.status = "error"
+                record.error = (
+                    f"incomplete: graded {result.cases}/{result.expected} cases, "
+                    + f"{result.failures} failure(s)"
+                )
         record.ended = now()
         ledger.save()
     return ledger
 
 
-def build_executor(tasks_dir: Path) -> Callable[[ResolvedRun, Path], Path | None]:
-    """Return the live executor: run one unit through the real pipeline and save its JSON report."""
+def build_executor(tasks_dir: Path) -> Callable[[ResolvedRun, Path], ExecResult]:
+    """Return the live executor: run one unit through the real pipeline and save its JSON report.
 
-    def execute(run: ResolvedRun, out_dir: Path) -> Path:
+    Reports the graded-case and failure counts so :func:`run_matrix` can refuse to mark an empty or
+    failure-carrying report as completed. ``expected`` is the number of instruction variants the
+    unit runs (filtered by ``instruction_id``) times one repeat.
+    """
+
+    def execute(run: ResolvedRun, out_dir: Path) -> ExecResult:
         manifest = load_manifest(tasks_dir / run.task)
         options = run.options
         options.workspace_root = out_dir / "workspaces" / run.run_id
         report = asyncio.run(run_evals([manifest], options, repeat=1, progress=False))
+        data = report_to_json(report)
         report_path = out_dir / f"{run.run_id}.json"
-        _ = report_path.write_text(json.dumps(report_to_json(report), indent=2), encoding="utf-8")
-        return report_path
+        _ = report_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        expected = sum(
+            1
+            for variant in manifest.instruction_variants
+            if options.instruction_id in (None, variant.id)
+        )
+        return ExecResult(
+            report=report_path,
+            cases=len(cast("list[object]", data["cases"])),
+            failures=len(cast("list[object]", data["failures"])),
+            expected=expected,
+        )
 
     return execute
 
