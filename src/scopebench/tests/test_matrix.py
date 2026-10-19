@@ -20,12 +20,14 @@ from scopebench.matrix import (
     MatrixSpec,
     ResolvedRun,
     build_executor,
+    endpoints_for,
     load_spec,
     plan,
     resolve_options,
     run_matrix,
 )
 from scopebench.runner import RunOptions
+from scopebench.warmup import Endpoint
 
 _Executor = Callable[[ResolvedRun, Path], ExecResult]
 
@@ -437,6 +439,101 @@ def test_build_executor_runs_pipeline_and_saves_report(
     assert result.ok
     assert str(seen["task_dir"]).endswith("tasks/task-x")
     assert str(seen["workspace_root"]).endswith("workspaces/a__t__r1")
+
+
+def test_endpoints_for_selects_self_hosted_actor_and_judge() -> None:
+    # Actor + a self-hosted judge on its own base URL: both warmed.
+    opts = RunOptions(
+        agent="harness",
+        model="openai-chat:qwen35-122b",
+        base_url="http://actor",
+        scopejudge=True,
+        judge_model="openai-chat:qwen36-27b",
+        judge_base_url="http://judge",
+    )
+    assert endpoints_for(opts) == [
+        Endpoint("qwen35-122b", "http://actor"),
+        Endpoint("qwen36-27b", "http://judge"),
+    ]
+
+
+def test_endpoints_for_omits_judge_when_gate_off_or_hosted() -> None:
+    # Gate off: no judge endpoint. Hosted (non-openai-chat) actor: nothing to warm.
+    gate_off = RunOptions(agent="harness", model="openai-chat:q", base_url="http://a")
+    assert endpoints_for(gate_off) == [Endpoint("q", "http://a")]
+    hosted = RunOptions(
+        agent="harness", model="anthropic:claude-x", scopejudge=True, judge_model="anthropic:claude"
+    )
+    assert endpoints_for(hosted) == []
+
+
+def test_endpoints_for_judge_falls_back_to_actor_base_url() -> None:
+    opts = RunOptions(
+        agent="harness",
+        model="openai-chat:q",
+        base_url="http://shared",
+        scopejudge=True,
+        judge_model="openai-chat:qj",  # no judge_base_url -> reuse the actor endpoint
+    )
+    assert endpoints_for(opts) == [
+        Endpoint("q", "http://shared"),
+        Endpoint("qj", "http://shared"),
+    ]
+
+
+def test_build_executor_warms_models_before_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    order: list[str] = []
+    probed: list[str] = []
+
+    class _Variant:
+        id: str = "program-brief-v3"
+
+    class _Manifest:
+        instruction_variants: ClassVar[list[_Variant]] = [_Variant()]
+
+    async def fake_run_evals(
+        _manifests: list[object], _options: RunOptions, **_kw: object
+    ) -> object:
+        order.append("run")
+        return object()
+
+    def fake_load_manifest(_task_dir: Path) -> _Manifest:
+        return _Manifest()
+
+    def fake_report_to_json(_report: object) -> dict[str, object]:
+        return {"cases": [{"name": "c"}], "failures": []}
+
+    monkeypatch.setattr(matrix, "load_manifest", fake_load_manifest)
+    monkeypatch.setattr(matrix, "run_evals", fake_run_evals)
+    monkeypatch.setattr(matrix, "report_to_json", fake_report_to_json)
+
+    def probe(model: str, _base_url: str) -> None:
+        order.append("warm")
+        probed.append(model)
+
+    execute = build_executor(tmp_path / "tasks", probe=probe)
+    run = ResolvedRun(
+        run_id="a__t__r1",
+        arm="a",
+        task="t",
+        rep=1,
+        options=RunOptions(
+            agent="harness",
+            model="openai-chat:qwen35-122b",
+            base_url="http://a",
+            scopejudge=True,
+            judge_model="openai-chat:qwen36-27b",
+            judge_base_url="http://j",
+        ),
+        config={},
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+    _ = execute(run, out)
+    assert probed == ["qwen35-122b", "qwen36-27b"]  # both warmed
+    assert order == ["warm", "warm", "run"]  # warming happens BEFORE the pipeline runs
 
 
 def test_main_runs_matrix_and_writes_ledger(

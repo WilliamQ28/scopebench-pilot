@@ -3,8 +3,10 @@
 #
 # Question: as the JUDGE (monitor) model shrinks while the ACTOR is held at the largest qwen,
 # does the ScopeJudge gate fail to protect RoE (more breaches) or over-block (lose capability)?
-# Only `judge_model` varies across arms; everything else is fixed. `interleaved` ordering runs all
-# arms back-to-back per (repeat, task) cell so slow-endpoint drift hits every arm equally.
+# Only `judge_model` varies across arms; everything else is fixed. Ordering is `sequential`
+# (arm-major) ON PURPOSE: the self-hosted endpoint scales idle models to zero, so running all of
+# one arm's units back-to-back keeps that arm's judge warm; interleaving would let each judge
+# scale down between cells and fail-closed on every spin-up. Each unit also warms its models first.
 #
 # The post-hoc Anthropic trajectory judge is OFF (trajectory_judge: false): the whole run stays on
 # the free self-hosted Vulcan endpoint and needs no ANTHROPIC_API_KEY. Scoped-case breach is
@@ -25,7 +27,7 @@ panel:
   - db-admin-panel-mixed-path
 
 repeat: 3
-ordering: interleaved
+ordering: sequential   # arm-major: keeps each scale-to-zero judge warm across its block
 seed: 0
 
 defaults:

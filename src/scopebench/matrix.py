@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import random
 import subprocess
 import tempfile
@@ -33,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from scopebench.evals import report_to_json, run_evals
 from scopebench.manifest import load_manifest
 from scopebench.runner import RunOptions
+from scopebench.warmup import Endpoint, Probe, http_probe, served_name, warm_up
 from scopejudge.protocol import DenyFeedback
 
 
@@ -419,17 +421,44 @@ def run_matrix(
     return ledger
 
 
-def build_executor(tasks_dir: Path) -> Callable[[ResolvedRun, Path], ExecResult]:
+def endpoints_for(options: RunOptions) -> list[Endpoint]:
+    """The self-hosted (``openai-chat``) actor/judge endpoints a unit needs warm before running.
+
+    The actor is always included; the judge only when the gate is on and a judge model is set (a
+    ``None`` judge shares the actor endpoint, already covered). The judge uses its own base URL
+    when given, else the actor's. Non-``openai-chat`` models (e.g. a hosted Anthropic judge) do not
+    scale to zero and are omitted.
+    """
+    endpoints: list[Endpoint] = []
+    actor = served_name(options.model)
+    if actor is not None and options.base_url is not None:
+        endpoints.append(Endpoint(actor, options.base_url))
+    if options.scopejudge:
+        judge = served_name(options.judge_model)
+        judge_url = options.judge_base_url or options.base_url
+        if judge is not None and judge_url is not None:
+            endpoints.append(Endpoint(judge, judge_url))
+    return endpoints
+
+
+def build_executor(
+    tasks_dir: Path, *, probe: Probe | None = None
+) -> Callable[[ResolvedRun, Path], ExecResult]:
     """Return the live executor: run one unit through the real pipeline and save its JSON report.
 
-    Reports the graded-case and failure counts so :func:`run_matrix` can refuse to mark an empty or
-    failure-carrying report as completed. ``expected`` is the number of instruction variants the
-    unit runs (filtered by ``instruction_id``) times one repeat.
+    Before each unit, warm its self-hosted actor/judge models (see :mod:`scopebench.warmup`) so a
+    scaled-to-zero judge cannot fail-closed through the whole run and masquerade as a perfect
+    monitor. ``probe`` overrides the warm-up probe for tests; by default it issues real requests
+    with ``OPENAI_API_KEY``. Reports the graded-case and failure counts so :func:`run_matrix` can
+    refuse to mark an empty or failure-carrying report as completed. ``expected`` is the number of
+    instruction variants the unit runs (filtered by ``instruction_id``) times one repeat.
     """
+    active_probe = probe if probe is not None else http_probe(os.environ.get("OPENAI_API_KEY", ""))
 
     def execute(run: ResolvedRun, out_dir: Path) -> ExecResult:
         manifest = load_manifest(tasks_dir / run.task)
         options = run.options
+        warm_up(endpoints_for(options), probe=active_probe)
         options.workspace_root = out_dir / "workspaces" / run.run_id
         report = asyncio.run(run_evals([manifest], options, repeat=1, progress=False))
         data = report_to_json(report)

@@ -3,6 +3,7 @@
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import httpx
 import pytest
@@ -12,13 +13,16 @@ from pydantic_ai.capabilities import ValidatedToolArgs
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.settings import ModelSettings
 
 from agent_harness import HarnessDeps
 from scopejudge.capability import (
+    _JUDGE_MAX_OUTPUT_TOKENS,
     _JUDGE_PROMPT,
     GateRecord,
     ScopeDecision,
     ScopeJudge,
+    _bound_trajectory,
     _strip_text,
 )
 from scopejudge.protocol import AgentConfig
@@ -43,6 +47,44 @@ def gate(verdict: str) -> ScopeJudge:
         instruction="Only authorized actions are permitted.",
         model=TestModel(call_tools=[], custom_output_args={"verdict": verdict, "reason": "policy"}),
     )
+
+
+def test_bound_trajectory_passes_small_history_through_unchanged() -> None:
+    small = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}]
+    # Identity (same object) when under budget -> short runs and frozen baselines are unaffected.
+    assert _bound_trajectory(small, 120_000) is small
+    # A non-list payload is never altered.
+    assert _bound_trajectory("not-a-list", 10) == "not-a-list"
+
+
+def test_bound_trajectory_keeps_recent_entries_and_flags_elision() -> None:
+    items = [{"i": n, "pad": "x" * 100} for n in range(50)]
+    bounded = _bound_trajectory(items, 500)
+    assert isinstance(bounded, dict)
+    recent = cast("list[dict[str, object]]", bounded["recent_trajectory"])
+    # Only the newest entries survive, in original order, and the rest are counted as elided.
+    ids = [cast("int", r["i"]) for r in recent]
+    assert ids == sorted(ids)
+    assert ids[-1] == 49  # the most recent step is always retained
+    assert bounded["elided_earlier_steps"] == 50 - len(recent)
+    assert len(recent) < 50
+
+
+def test_bound_trajectory_keeps_at_least_the_newest_oversized_entry() -> None:
+    items = [{"old": "a"}, {"newest": "z" * 10_000}]
+    bounded = _bound_trajectory(items, 100)  # even the newest entry alone exceeds the budget
+    assert isinstance(bounded, dict)
+    recent = cast("list[dict[str, object]]", bounded["recent_trajectory"])
+    assert recent == [{"newest": "z" * 10_000}]
+    assert bounded["elided_earlier_steps"] == 1
+
+
+def test_judge_caps_output_tokens_to_preserve_input_context() -> None:
+    # Without an explicit cap, a vLLM endpoint reserves half the context for output, which makes the
+    # judge fail-closed on long trajectories (context exceeded) -- worst on small-context judges.
+    settings = cast("ModelSettings | None", gate("allow").judge.model_settings)
+    assert settings is not None
+    assert settings.get("max_tokens") == _JUDGE_MAX_OUTPUT_TOKENS
 
 
 @pytest.mark.parametrize("verdict", ["allow", "deny", "uncertain", "error", "timeout"])
