@@ -19,6 +19,7 @@ import hashlib
 import json
 import random
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -35,7 +36,7 @@ from scopejudge.protocol import DenyFeedback
 
 
 class MatrixMismatchError(RuntimeError):
-    """A resume was attempted against a ledger from a different spec or code revision."""
+    """A resume's spec, revision, or resolved inputs differ from the stored ledger."""
 
 
 class ArmSettings(BaseModel):
@@ -246,19 +247,26 @@ def _utcnow() -> str:
     return datetime.now(UTC).isoformat()
 
 
-class RunRecord(BaseModel):
-    """Ledger entry for one run unit (serialised to/from the ledger JSON)."""
+class AttemptRecord(BaseModel):
+    """Status and evidence for one execution attempt, retained across retries."""
 
     status: Literal["pending", "running", "completed", "error"]
-    config: dict[str, object]
     started: str | None = None
     ended: str | None = None
     report: str | None = None
+    evidence_dir: str | None = None
     error: str | None = None
     # Graded-outcome evidence recorded so "completed" is defensible (see ExecResult.ok).
     cases: int = 0
     failures: int = 0
     expected: int = 0
+
+
+class RunRecord(AttemptRecord):
+    """Latest run state plus its resolved configuration and complete attempt history."""
+
+    config: dict[str, object]
+    attempts: list[AttemptRecord] = Field(default_factory=list)
 
 
 @dataclass
@@ -304,9 +312,9 @@ class Ledger:
     ) -> Ledger:
         """Load an existing ledger (preserving completed evidence) or start a fresh one.
 
-        A resume is only valid when the stored spec AND code revision match the current run; a
-        mismatch raises :class:`MatrixMismatchError` rather than silently reusing incompatible
-        results. Start a new ``--out`` directory (or restore the revision) to proceed.
+        The stored spec, revision, and resolved configuration (including brief content hashes)
+        must match. A mismatch raises :class:`MatrixMismatchError` before touching any evidence.
+        Start a new ``--out`` directory or restore the original inputs to proceed.
         """
         path = out_dir / "ledger.json"
         if path.is_file():
@@ -331,6 +339,11 @@ class Ledger:
         for unit in units:
             if unit.run_id not in ledger.runs:
                 ledger.runs[unit.run_id] = RunRecord(status="pending", config=unit.config)
+            elif ledger.runs[unit.run_id].config != unit.config:
+                raise MatrixMismatchError(
+                    f"{path}: resolved configuration changed for {unit.run_id} "
+                    + "(including attacker brief contents); use a new --out directory"
+                )
         return ledger
 
 
@@ -347,8 +360,9 @@ def run_matrix(
     ``execute(run, out_dir) -> ExecResult`` runs one unit; a unit is marked ``completed`` only when
     its result is :attr:`ExecResult.ok` (every expected case graded, no failures) -- a report that
     is empty or carries infrastructure failures becomes ``error``, so a failed run is never skipped
-    on resume. Completed units are skipped and their evidence is preserved; the ledger is written
-    after every status change.
+    on resume. Every attempt receives a fresh directory under ``attempts/<run_id>/`` for reports
+    and workspaces. Its status and errors remain in ``RunRecord.attempts`` across retries and
+    interruptions. Completed units are skipped; the ledger is written after every status change.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     units = plan(spec)
@@ -360,11 +374,22 @@ def run_matrix(
         record = ledger.runs[run.run_id]
         if record.status == "completed":
             continue
+        # Preserve pre-history ledgers too, before clearing the latest attempt's state.
+        if not record.attempts and record.status != "pending":
+            record.attempts.append(AttemptRecord.model_validate(record.model_dump()))
+        attempts_dir = out_dir / "attempts" / run.run_id
+        attempts_dir.mkdir(parents=True, exist_ok=True)
+        attempt_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=attempts_dir))
         record.status = "running"
         record.started = now()
+        record.evidence_dir = str(attempt_dir)
+        record.ended = record.report = record.error = None
+        record.cases = record.failures = record.expected = 0
+        attempt = AttemptRecord.model_validate(record.model_dump())
+        record.attempts.append(attempt)
         ledger.save()
         try:
-            result = execute(run, out_dir)
+            result = execute(run, attempt_dir)
         except Exception as exc:  # noqa: BLE001 - one unit's failure must not abort the matrix
             record.status = "error"
             record.error = f"{type(exc).__name__}: {exc}"
@@ -384,6 +409,7 @@ def run_matrix(
                     + f"{result.failures} failure(s)"
                 )
         record.ended = now()
+        record.attempts[-1] = AttemptRecord.model_validate(record.model_dump())
         ledger.save()
     return ledger
 

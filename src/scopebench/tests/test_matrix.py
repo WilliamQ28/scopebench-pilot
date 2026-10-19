@@ -316,6 +316,76 @@ def test_run_matrix_rejects_spec_mismatch_on_resume(tmp_path: Path) -> None:
         )
 
 
+def test_resume_rejects_changed_brief_before_touching_evidence(tmp_path: Path) -> None:
+    brief = tmp_path / "brief.md"
+    brief.write_text("original", encoding="utf-8")
+    spec = _spec(arms=[Arm(name="a", attacker_brief=str(brief))])
+    out = tmp_path / "out"
+    run_matrix(spec, out, execute=_fake_execute([]), revision="r")
+    before = (out / "ledger.json").read_bytes()
+    brief.write_text("changed", encoding="utf-8")
+    calls: list[str] = []
+    with pytest.raises(MatrixMismatchError, match="resolved configuration changed"):
+        run_matrix(spec, out, execute=_fake_execute(calls), revision="r")
+    assert calls == []
+    assert (out / "ledger.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("failure", ["report", "exception", "interruption", "legacy"])
+def test_retry_preserves_evidence_and_clears_latest_error(tmp_path: Path, failure: str) -> None:
+    spec = _spec(panel=["task"], arms=[Arm(name="a")], repeat=1)
+    rid = "a__task__r1"
+    seen: list[Path] = []
+
+    def fail(run: ResolvedRun, out: Path) -> ExecResult:
+        seen.append(out)
+        path = out / f"{run.run_id}.json"
+        path.write_text('{"failure": "original"}', encoding="utf-8")
+        if failure == "exception":
+            raise RuntimeError("original failure")
+        if failure == "interruption":
+            raise KeyboardInterrupt
+        return ExecResult(report=path, failures=1, expected=1)
+
+    if failure == "interruption":
+        with pytest.raises(KeyboardInterrupt):
+            run_matrix(spec, tmp_path, execute=fail, revision="r")
+    else:
+        run_matrix(spec, tmp_path, execute=fail, revision="r")
+    if failure == "legacy":
+        path = tmp_path / "ledger.json"
+        data = cast("dict[str, object]", json.loads(path.read_text()))
+        runs = cast("dict[str, dict[str, object]]", data["runs"])
+        del runs[rid]["attempts"]
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    def succeed(run: ResolvedRun, out: Path) -> ExecResult:
+        seen.append(out)
+        path = out / f"{run.run_id}.json"
+        path.write_text('{"success": true}', encoding="utf-8")
+        return ExecResult(report=path, cases=1, expected=1)
+
+    ledger = run_matrix(spec, tmp_path, execute=succeed, revision="r")
+    record = ledger.runs[rid]
+    assert seen[0] != seen[1]
+    assert json.loads((seen[0] / f"{rid}.json").read_text()) == {"failure": "original"}
+    assert record.status == "completed"
+    assert record.error is None
+    assert record.failures == 0
+    assert len(record.attempts) == 2
+    first, second = record.attempts
+    assert first.status == ("running" if failure == "interruption" else "error")
+    assert first.evidence_dir == str(seen[0])
+    assert second.status == "completed"
+    assert second.error is None
+    if failure != "interruption":
+        assert first.error
+    saved = cast("dict[str, object]", json.loads((tmp_path / "ledger.json").read_text()))
+    saved_runs = cast("dict[str, dict[str, object]]", saved["runs"])
+    assert len(cast("list[object]", saved_runs[rid]["attempts"])) == 2
+    assert saved_runs[rid]["error"] is None
+
+
 def test_build_executor_runs_pipeline_and_saves_report(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -327,9 +397,7 @@ def test_build_executor_runs_pipeline_and_saves_report(
     class _Manifest:
         instruction_variants: ClassVar[list[_Variant]] = [_Variant()]
 
-    async def fake_run_evals(
-        manifests: list[object], options: RunOptions, **_kw: object
-    ) -> object:
+    async def fake_run_evals(manifests: list[object], options: RunOptions, **_kw: object) -> object:
         seen["manifests"] = manifests
         seen["workspace_root"] = options.workspace_root
         return object()
