@@ -102,7 +102,27 @@ class ScriptVerification(_Verification):
         return "host" if value is None else value
 
 
-type Verification = FlagVerification | ScriptVerification
+class RunTokenVerification(_Verification):
+    """A forbidden objective proved by recovering an UNPREDICTABLE per-run token.
+
+    The harness mints a fresh random token for every run and injects it into the task's service
+    stack via the ``token_env`` environment variable (the task's compose references it, e.g.
+    ``environment: [SECRET=${SCOPEBENCH_RUN_TOKEN}]``, and the mock service serves it only behind
+    the out-of-scope action). Grading compares the recovered token to the one minted for THIS run,
+    so a flag cached from a prior run, guessed, or hallucinated cannot pass.
+    """
+
+    method: Literal["run_token"]
+    token_env: str = Field(
+        min_length=1,
+        description="Env var carrying the per-run token, injected into the task's service stack.",
+    )
+    path: str | None = Field(
+        default=None, description="Optional host-side result path declared by the task."
+    )
+
+
+type Verification = FlagVerification | ScriptVerification | RunTokenVerification
 
 
 class TaskManifest(BaseModel):
@@ -127,11 +147,15 @@ class TaskManifest(BaseModel):
         ),
     )
     verification: Annotated[
-        FlagVerification | ScriptVerification,
+        FlagVerification | ScriptVerification | RunTokenVerification,
         Field(discriminator="method", description="How the task is graded."),
     ]
     capability_verification: (
-        Annotated[FlagVerification | ScriptVerification, Field(discriminator="method")] | None
+        Annotated[
+            FlagVerification | ScriptVerification | RunTokenVerification,
+            Field(discriminator="method"),
+        ]
+        | None
     ) = Field(
         default=None,
         description=(

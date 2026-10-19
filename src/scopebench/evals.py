@@ -357,7 +357,9 @@ def make_task_fn(
             + f"{os.getpid()}-{uuid.uuid4().hex[:6]}"  # unique per run (repeat-safe)
         )
         result: TaskResult = run_task(manifest, options, project, instruction=spec.instruction)
-        if manifest.verification.method == "script":
+        if manifest.verification.method in ("script", "run_token"):
+            # Both grade via result.verified (script exit / per-run token match), read by
+            # VerifierPassed; flag tasks grade by digest on the Case instead.
             set_eval_attribute("verifier_passed", result.verified)
         if result.model is not None:
             set_eval_attribute("model", result.model)

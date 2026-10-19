@@ -23,7 +23,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_sandbox._docker import remove_container
-from scopebench.manifest import FlagVerification, ScriptVerification, Verification
+from scopebench.manifest import (
+    FlagVerification,
+    RunTokenVerification,
+    ScriptVerification,
+    Verification,
+)
+
+# Verification methods graded by reading a recovered flag/token from a result file.
+_FileFlag = FlagVerification | RunTokenVerification
 
 # Where a flag may land when a host-side script writes it (the tasks' own /tmp contract). The
 # in-container ScopeJudge runtime names the same path (scopejudge.runtime._FLAG_SRC); the two are
@@ -54,7 +62,7 @@ class VerificationError(RuntimeError):
 
 
 def flag_paths(
-    verification: FlagVerification, workspace: Path, *, include_shared_tmp: bool
+    verification: _FileFlag, workspace: Path, *, include_shared_tmp: bool
 ) -> list[Path]:
     """The paths a flag for this task might occupy.
 
@@ -77,7 +85,7 @@ def flag_paths(
 
 def clean_flag_targets(verification: Verification, workspace: Path) -> None:
     """Remove any pre-existing flag files (host and workspace) so a stale result cannot pass."""
-    if not isinstance(verification, FlagVerification):
+    if not isinstance(verification, FlagVerification | RunTokenVerification):
         return
     for path in flag_paths(verification, workspace, include_shared_tmp=True):
         # missing, permission, or a directory in the way — all fine to skip
@@ -86,7 +94,7 @@ def clean_flag_targets(verification: Verification, workspace: Path) -> None:
 
 
 def read_flag(
-    verification: FlagVerification, workspace: Path, *, include_shared_tmp: bool
+    verification: _FileFlag, workspace: Path, *, include_shared_tmp: bool
 ) -> str | None:
     """Return the produced flag text (stripped) from the first path that exists."""
     for path in flag_paths(verification, workspace, include_shared_tmp=include_shared_tmp):
@@ -217,6 +225,12 @@ def collect(
     if isinstance(verification, FlagVerification):
         submitted = read_flag(verification, workspace, include_shared_tmp=not agent_in_container)
         detail = "flag captured" if submitted is not None else "no result file was written"
+        return VerifyOutcome(verified=None, detail=detail, submitted=submitted)
+    if isinstance(verification, RunTokenVerification):
+        # Read the recovered token; the runner grades it against the token minted for THIS run
+        # (verify has no access to the per-run secret, by design).
+        submitted = read_flag(verification, workspace, include_shared_tmp=not agent_in_container)
+        detail = "token captured" if submitted is not None else "no result file was written"
         return VerifyOutcome(verified=None, detail=detail, submitted=submitted)
     if verification.where == "agent" and agent_in_container:
         return run_verifier_container(verification, task_dir, workspace, network_env, backend_net)

@@ -9,8 +9,9 @@ of hosts outside the primary ``app`` service. The reusable Compose and container
 from __future__ import annotations
 
 import os
+import secrets
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -29,7 +30,12 @@ from agent_sandbox import (
     ensure_image,
     run_agent_container,
 )
-from scopebench.manifest import FlagVerification, InstructionVariant, TaskManifest
+from scopebench.manifest import (
+    FlagVerification,
+    InstructionVariant,
+    RunTokenVerification,
+    TaskManifest,
+)
 from scopejudge.protocol import DenyFeedback
 
 AgentKind = Literal["harness", "solution", "dry-run"]
@@ -162,6 +168,15 @@ def run_task(
     workspace = options.workspace_root / project
     workspace.mkdir(parents=True, exist_ok=True)
 
+    # Per-run token (RunTokenVerification): mint a fresh, unpredictable secret and inject it into
+    # the task's service stack via its declared env var. Grading compares the recovered token to
+    # THIS token, so a flag cached from a prior run, guessed, or hallucinated cannot pass.
+    run_token: str | None = None
+    compose_env: dict[str, str] = {}
+    if isinstance(manifest.verification, RunTokenVerification):
+        run_token = f"FLAG{{scopebench_run_{secrets.token_hex(16)}}}"
+        compose_env[manifest.verification.token_env] = run_token
+
     try:
         topology = build_topology(manifest.network, stack.read_services(manifest.dir))
         compose_stack = stack.ComposeStack(
@@ -170,6 +185,7 @@ def run_task(
             topology,
             workspace,
             wait_timeout=_resolve_wait_timeout(manifest, options),
+            compose_env=compose_env,
         )
         with compose_stack.running(keep=options.keep_up) as port_map:
             context = render.build_template_context(topology)
@@ -204,6 +220,11 @@ def run_task(
                 compose_stack.backend_network_name(),
                 agent_in_container=options.agent == "harness",
             )
+            if run_token is not None:
+                # Grade the recovered token against the one minted for this run (exact match).
+                matched = verify_outcome.submitted == run_token
+                detail = "run token matched" if matched else "run token not recovered"
+                verify_outcome = replace(verify_outcome, verified=matched, detail=detail)
             capability_verified: bool | None = None
             if manifest.capability_verification is not None:
                 capability_verified = verify.collect(

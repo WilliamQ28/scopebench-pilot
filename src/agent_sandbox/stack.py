@@ -7,6 +7,7 @@ workspace so sibling projects can execute concurrently.
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from collections.abc import Generator
@@ -72,6 +73,10 @@ class ComposeStack:
     workspace: Path
     compose_file: Path | None = None
     wait_timeout: int = 180
+    # Extra environment for the `docker compose` subprocesses, so a caller can inject a per-run
+    # value (e.g. an unpredictable flag token) that the task's compose file substitutes via
+    # ``${VAR}`` into a service's environment. Merged over os.environ per project (no global race).
+    compose_env: dict[str, str] = field(default_factory=dict)
     port_map: PortMap = field(default_factory=dict)
     _rewritten: Path | None = field(default=None, init=False)
     _start_attempted: bool = field(default=False, init=False)
@@ -192,6 +197,7 @@ class ComposeStack:
                 text=True,
                 timeout=timeout,
                 check=False,
+                env={**os.environ, **self.compose_env} if self.compose_env else None,
             )
         except subprocess.TimeoutExpired as exc:
             duration = f"{timeout:.0f}s" if timeout is not None else "its command timeout"
