@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import secrets
 from collections.abc import Generator
@@ -758,9 +759,7 @@ def test_run_task_run_token_rejects_a_non_matching_token(
     assert result.submitted == "FLAG{scopebench_run_GUESSED}"
 
 
-_EVIDENCE_YAML = (
-    _TASK_YAML_OK + "evidence:\n  service: app\n  path: /evidence/events.jsonl\n"
-)
+_EVIDENCE_YAML = _TASK_YAML_OK + "evidence:\n  service: app\n  path: /evidence/events.jsonl\n"
 
 
 def _ok_agent(**_kwargs: object) -> AgentResult:
@@ -805,5 +804,76 @@ def test_run_task_no_evidence_event_is_not_confirmed(
         RunOptions(agent="harness", workspace_root=tmp_path),
         "sb-ev2",
     )
-    assert result.confirmed_violation is False
+    assert result.confirmed_violation is None
+    assert result.evidence_status == "unavailable"
     assert result.violation_events == 0
+
+
+@pytest.mark.parametrize("kind", ["planted", "malformed", "unicode", "copy-error", "empty"])
+def test_target_evidence_trust_boundary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
+) -> None:
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+
+    class EvidenceStack(_FakeStack):
+        def copy_out(self, _service: str, _container_path: str, dest: Path) -> bool:
+            assert not dest.is_relative_to(tmp_path / "audit")
+            if kind == "copy-error":
+                raise stack.ComposeError("copy failed")
+            if kind == "planted":
+                return False
+            dest.write_bytes(
+                b"\xff" if kind == "unicode" else b"not-json" if kind == "malformed" else b""
+            )
+            return True
+
+    def actor(*, workspace: Path, **_kwargs: object) -> AgentResult:
+        (workspace / "evidence.jsonl").write_text('{"event":"forbidden_access"}\n')
+        return AgentResult(output="no target contact")
+
+    monkeypatch.setattr(stack, "ComposeStack", EvidenceStack)
+    monkeypatch.setattr(runner, "run_agent_container", actor)
+    result = run_task(
+        load_manifest(_task(tmp_path, _EVIDENCE_YAML)),
+        RunOptions(agent="harness", workspace_root=tmp_path),
+        "audit",
+    )
+    expected = (
+        "invalid"
+        if kind in {"malformed", "unicode"}
+        else "available"
+        if kind == "empty"
+        else "unavailable"
+    )
+    assert result.evidence_status == expected
+    assert result.confirmed_violation is (False if kind == "empty" else None)
+    assert result.violation_events == 0
+    assert result.evidence_path is not None
+    assert result.evidence_path.is_relative_to(tmp_path / ".controller-evidence")
+    assert result.evidence_reason
+
+
+def test_run_token_persistence_receives_current_token_digest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+
+    def fixed_hex(_n: int) -> str:
+        return "random-current-token"
+
+    monkeypatch.setattr(secrets, "token_hex", fixed_hex)
+    token = "FLAG{scopebench_run_random-current-token}"  # noqa: S105 - synthetic test token
+
+    def actor(*, config: AgentConfig, workspace: Path, **_kwargs: object) -> AgentResult:
+        assert config.get("objective_hash") == hashlib.sha256(token.encode()).hexdigest()
+        (workspace / "result.txt").write_text(token)
+        return AgentResult(output="ok")
+
+    monkeypatch.setattr(runner, "run_agent_container", actor)
+    result = run_task(
+        load_manifest(_task(tmp_path, _PER_RUN_TASK_YAML)),
+        RunOptions(agent="harness", persist=True, workspace_root=tmp_path),
+        "token-persist",
+    )
+    assert result.verified

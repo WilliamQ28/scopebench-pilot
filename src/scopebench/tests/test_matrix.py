@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -105,6 +106,7 @@ def test_resolve_options_config_is_fully_effective_not_sparse() -> None:
     assert config["request_limit"] == 40  # the RunOptions default, recorded (not omitted)
     assert config["timeout"] == 600.0
     assert config["deny_feedback"] == "reasoned"
+    assert config["trajectory_judge"] is True  # RunOptions default recorded when unset
     assert "attacker_brief_sha256" not in config  # no brief -> no hash
 
 
@@ -142,6 +144,7 @@ def test_resolve_options_maps_every_field(tmp_path: Path) -> None:
                     "judge_base_url": "http://j",
                     "judge_timeout": 90.0,
                     "scopejudge": True,
+                    "trajectory_judge": False,
                     "deny_feedback": "white",
                     "hide_brief_from_judge": True,
                     "attacker_brief": str(brief),
@@ -163,6 +166,8 @@ def test_resolve_options_maps_every_field(tmp_path: Path) -> None:
     assert o.judge_base_url == "http://j"
     assert o.judge_timeout == 90.0
     assert o.scopejudge is True
+    assert o.trajectory_judge is False  # arm can disable the post-hoc Anthropic judge
+    assert cfg["trajectory_judge"] is False
     assert o.deny_feedback == "white"
     assert o.hide_brief_from_judge is True
     assert o.persist is True
@@ -447,11 +452,36 @@ def test_main_runs_matrix_and_writes_ledger(
         return execute
 
     monkeypatch.setattr(matrix, "build_executor", fake_build)
+    monkeypatch.chdir(tmp_path)  # no .env here, so the dotenv load is a silent no-op
     out = tmp_path / "out"
     rc = matrix.main([str(spec_path), "--out", str(out), "--tasks-dir", str(tmp_path / "tasks")])
     assert rc == 0
     assert (out / "ledger.json").is_file()
     assert "completed" in capsys.readouterr().out
+
+
+def test_main_loads_dotenv_from_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A matrix launched from a bare shell must still pick up the endpoint credentials from ./.env,
+    # like the plain `scopebench` CLI, or the actor/judge would have no OPENAI_API_KEY/base URL.
+    spec_path = tmp_path / "m.yaml"
+    _ = spec_path.write_text(_SPEC_YAML, encoding="utf-8")
+    _ = (tmp_path / ".env").write_text("SCOPEBENCH_DOTENV_PROBE=loaded\n", encoding="utf-8")
+    monkeypatch.delenv("SCOPEBENCH_DOTENV_PROBE", raising=False)
+
+    def fake_build(_tasks_dir: Path) -> _Executor:
+        def execute(run: ResolvedRun, out: Path) -> ExecResult:
+            return ExecResult(report=out / f"{run.run_id}.json", cases=1, failures=0, expected=1)
+
+        return execute
+
+    monkeypatch.setattr(matrix, "build_executor", fake_build)
+    monkeypatch.chdir(tmp_path)
+    _ = matrix.main(
+        [str(spec_path), "--out", str(tmp_path / "out"), "--tasks-dir", str(tmp_path / "t")]
+    )
+    assert os.environ.get("SCOPEBENCH_DOTENV_PROBE") == "loaded"
 
 
 def test_main_returns_nonzero_on_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -465,6 +495,7 @@ def test_main_returns_nonzero_on_errors(monkeypatch: pytest.MonkeyPatch, tmp_pat
         return execute
 
     monkeypatch.setattr(matrix, "build_executor", fake_build)
+    monkeypatch.chdir(tmp_path)  # no .env here, so the dotenv load is a silent no-op
     rc = matrix.main(
         [str(spec_path), "--out", str(tmp_path / "o"), "--tasks-dir", str(tmp_path / "t")]
     )

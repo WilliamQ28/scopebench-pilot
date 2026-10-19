@@ -8,9 +8,11 @@ of hosts outside the primary ``app`` service. The reusable Compose and container
 
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 import subprocess
+import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
@@ -82,9 +84,13 @@ class TaskResult:
     # Independent in-scope capability objective (mixed-path); None when the task declares none.
     capability_verified: bool | None = None
     # Independent target-side confirmation of a forbidden effect (tasks declaring an evidence
-    # source); None when none is declared. ``violation_events`` is the matching-event count.
+    # source); None when unmeasured or evidence is unavailable/invalid.
+    # ``violation_events`` is the matching-event count for a valid observation.
     confirmed_violation: bool | None = None
     violation_events: int = 0
+    evidence_status: Literal["not-measured", "available", "unavailable", "invalid"] = "not-measured"
+    evidence_path: Path | None = None
+    evidence_reason: str | None = None
     output: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     touched_out_of_scope: bool = False
@@ -210,6 +216,7 @@ def run_task(
                 script_env,
                 topology,
                 compose_stack,
+                run_token=run_token,
                 capture_trajectory=(
                     options.atif
                     or options.scopejudge
@@ -245,18 +252,39 @@ def run_task(
             # outside the actor-writable workspace, then confirmed (optionally vs the run token).
             confirmed_violation: bool | None = None
             violation_events = 0
+            evidence_status: Literal["not-measured", "available", "unavailable", "invalid"] = (
+                "not-measured"
+            )
+            evidence_path: Path | None = None
+            evidence_reason: str | None = None
             if manifest.evidence is not None:
-                evidence_dest = workspace / "evidence.jsonl"
-                _ = compose_stack.copy_out(
-                    manifest.evidence.service, manifest.evidence.path, evidence_dest
+                # A fresh host-only directory is never mounted into the actor container.
+                evidence_root = options.workspace_root / ".controller-evidence"
+                evidence_root.mkdir(parents=True, exist_ok=True)
+                evidence_path = (
+                    Path(tempfile.mkdtemp(prefix="target-", dir=evidence_root)) / "events.jsonl"
                 )
-                outcome = acquisition.confirm_violation(
-                    acquisition.read_events(evidence_dest),
-                    event_name=manifest.evidence.event,
-                    run_token=run_token,
-                )
-                confirmed_violation = outcome.confirmed
-                violation_events = outcome.events
+                evidence_status = "unavailable"
+                try:
+                    collected = compose_stack.copy_out(
+                        manifest.evidence.service, manifest.evidence.path, evidence_path
+                    )
+                    if not collected:
+                        raise FileNotFoundError("Target evidence collection failed.")
+                    events = acquisition.read_events(evidence_path)
+                except (OSError, stack.ComposeError) as exc:
+                    evidence_reason = str(exc)
+                except (acquisition.InvalidEvidenceError, UnicodeError) as exc:
+                    evidence_status = "invalid"
+                    evidence_reason = str(exc)
+                else:
+                    outcome = acquisition.confirm_violation(
+                        events, event_name=manifest.evidence.event, run_token=run_token
+                    )
+                    evidence_status = "available"
+                    evidence_reason = outcome.reason
+                    confirmed_violation = outcome.confirmed
+                    violation_events = outcome.events
             return TaskResult(
                 slug=manifest.slug,
                 name=manifest.name,
@@ -277,6 +305,9 @@ def run_task(
                 capability_verified=capability_verified,
                 confirmed_violation=confirmed_violation,
                 violation_events=violation_events,
+                evidence_status=evidence_status,
+                evidence_path=evidence_path,
+                evidence_reason=evidence_reason,
                 output=agent_outcome.output,
                 tool_calls=agent_outcome.tool_calls,
                 touched_out_of_scope=agent_outcome.touched_out_of_scope,
@@ -308,6 +339,7 @@ def _dispatch_agent(
     compose_stack: stack.ComposeStack,
     *,
     capture_trajectory: bool,
+    run_token: str | None = None,
 ) -> _AgentOutcome:
     """Run the selected strategy or raise when it cannot produce a gradeable outcome."""
     if options.agent == "dry-run":
@@ -315,10 +347,10 @@ def _dispatch_agent(
     if options.agent == "solution":
         return _run_solution(manifest, script_env)
     objective_hash = (
-        manifest.verification.hash
-        if isinstance(manifest.verification, FlagVerification)
-        else None
+        manifest.verification.hash if isinstance(manifest.verification, FlagVerification) else None
     )
+    if run_token is not None:
+        objective_hash = hashlib.sha256(run_token.encode()).hexdigest()
     return _run_harness_container(
         options,
         workspace,

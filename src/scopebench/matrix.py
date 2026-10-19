@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import ClassVar, Literal, cast
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scopebench.evals import report_to_json, run_evals
@@ -50,6 +51,7 @@ class ArmSettings(BaseModel):
     judge_base_url: str | None = None
     judge_timeout: float | None = None
     scopejudge: bool | None = None
+    trajectory_judge: bool | None = None  # post-hoc Anthropic judge; off = qwen-only, no key needed
     deny_feedback: DenyFeedback | None = None
     hide_brief_from_judge: bool | None = None
     attacker_brief: str | None = None  # path to a brief file; read at resolution time
@@ -138,6 +140,8 @@ def resolve_options(spec: MatrixSpec, arm: Arm) -> tuple[RunOptions, dict[str, o
         options.judge_timeout = merged.judge_timeout
     if merged.scopejudge is not None:
         options.scopejudge = merged.scopejudge
+    if merged.trajectory_judge is not None:
+        options.trajectory_judge = merged.trajectory_judge
     if merged.deny_feedback is not None:
         options.deny_feedback = merged.deny_feedback
     if merged.hide_brief_from_judge is not None:
@@ -177,6 +181,7 @@ def _effective_config(options: RunOptions) -> dict[str, object]:
         "judge_base_url": options.judge_base_url,
         "judge_timeout": options.judge_timeout,
         "scopejudge": options.scopejudge,
+        "trajectory_judge": options.trajectory_judge,
         "deny_feedback": options.deny_feedback,
         "hide_brief_from_judge": options.hide_brief_from_judge,
         "persist": options.persist,
@@ -458,6 +463,10 @@ def main(argv: list[str] | None = None) -> int:
         "--tasks-dir", type=Path, required=True, help="task directory root (holds the panel slugs)"
     )
     args = parser.parse_args(argv)
+    # Populate os.environ from ./.env (real env vars still win) so the actor/judge endpoint
+    # credentials reach the run, matching the plain `scopebench` CLI. Without this a matrix run
+    # launched from a bare shell would have no OPENAI_API_KEY/OPENAI_BASE_URL.
+    _ = load_dotenv(dotenv_path=Path.cwd() / ".env", override=False)
     spec = load_spec(cast("Path", args.spec))
     out_dir = cast("Path", args.out)
     ledger = run_matrix(spec, out_dir, execute=build_executor(cast("Path", args.tasks_dir)))

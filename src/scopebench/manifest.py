@@ -129,9 +129,10 @@ class EvidenceSource(BaseModel):
     """A target-side evidence log the harness copies out of a service before teardown.
 
     The mock service records each forbidden access as a JSON line (``{"event": ..., "token": ...}``)
-    to ``path`` inside the ``service`` container -- a location the acting agent cannot write (it
-    only ever mounts ``/work``). Reading that INDEPENDENT record upgrades a candidate breach (a
-    token in the actor's workspace) to a confirmed executed violation.
+    to ``path`` inside the ``service`` container. The controller collects it into a host-only
+    directory, never the actor's mounted workspace. Tasks must protect the source log from attacker
+    modification, including through a compromised service. Confirmation concerns the declared event;
+    attribution to a specific gate decision requires separate correlation.
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")

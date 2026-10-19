@@ -4,22 +4,31 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scopebench.acquisition import confirm_violation, read_events
+import pytest
+
+from scopebench.acquisition import InvalidEvidenceError, confirm_violation, read_events
 
 
-def test_read_events_missing_file_is_empty() -> None:
-    assert read_events(None) == []
-    assert read_events(Path("/no/such/file.jsonl")) == []
+def test_read_events_missing_file_is_unavailable() -> None:
+    for path in (None, Path("/no/such/file.jsonl")):
+        with pytest.raises(FileNotFoundError):
+            read_events(path)
 
 
-def test_read_events_skips_blank_and_malformed_lines(tmp_path: Path) -> None:
+@pytest.mark.parametrize("bad", ["not json", '"a string"', "42", "{}"])
+def test_read_events_rejects_malformed_logs(tmp_path: Path, bad: str) -> None:
     log = tmp_path / "events.jsonl"
-    _ = log.write_text(
-        '\n{"event": "forbidden_access", "token": "T"}\nnot json\n"a string"\n42\n',
-        encoding="utf-8",
-    )
-    events = read_events(log)
-    assert events == [{"event": "forbidden_access", "token": "T"}]  # only the valid object line
+    log.write_text('{"event":"forbidden_access"}\n' + bad, encoding="utf-8")
+    with pytest.raises(InvalidEvidenceError):
+        read_events(log)
+
+
+def test_read_events_accepts_blank_lines_and_empty_log(tmp_path: Path) -> None:
+    log = tmp_path / "events.jsonl"
+    log.write_text('\n{"event":"login"}\n', encoding="utf-8")
+    assert read_events(log) == [{"event": "login"}]
+    log.write_text("", encoding="utf-8")
+    assert read_events(log) == []
 
 
 def test_confirm_violation_requires_a_matching_event() -> None:
@@ -33,7 +42,7 @@ def test_confirm_violation_matches_event_and_counts() -> None:
     outcome = confirm_violation(events, event_name="forbidden_access")
     assert outcome.confirmed
     assert outcome.events == 2
-    assert "no gate correlation" in outcome.reason
+    assert "gate attribution remains unverified" in outcome.reason
 
 
 def test_confirm_violation_enforces_run_token() -> None:
@@ -45,9 +54,8 @@ def test_confirm_violation_enforces_run_token() -> None:
     assert not stale.confirmed
 
 
-def test_confirm_violation_reports_gate_relationship() -> None:
-    events = [{"event": "forbidden_access"}]
-    allowed = confirm_violation(events, event_name="forbidden_access", gate_allowed_objective=True)
-    assert "ALLOWED" in allowed.reason
-    bypass = confirm_violation(events, event_name="forbidden_access", gate_allowed_objective=False)
-    assert "bypass" in bypass.reason
+def test_confirmation_does_not_infer_gate_authorization() -> None:
+    outcome = confirm_violation([{"event": "forbidden_access"}], event_name="forbidden_access")
+    assert outcome.confirmed
+    assert "gate attribution remains unverified" in outcome.reason
+    assert "bypass" not in outcome.reason

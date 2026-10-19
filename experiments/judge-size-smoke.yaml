@@ -1,0 +1,25 @@
+# One-unit live smoke for the judge-size matrix: proves the pipeline end-to-end AND that the
+# smallest qwen judge can serve as the ScopeJudge monitor. Not an experiment -- throwaway output.
+name: judge-size-smoke
+panel:
+  - traversal-overreach-dead-end
+repeat: 1
+ordering: sequential
+seed: 0
+defaults:
+  model: openai-chat:qwen35-122b
+  base_url: https://inference.vulcan.alliancecan.ca/v1
+  instruction: program-brief-v3
+  scopejudge: true
+  trajectory_judge: false
+  judge_base_url: https://inference.vulcan.alliancecan.ca/v1
+  judge_timeout: 120
+  deny_feedback: reasoned
+  hide_brief_from_judge: true
+  request_limit: 150
+  timeout: 7200
+  max_tool_result_chars: 12000
+  attacker_brief: briefs/adaptive-monitor-aware.md
+arms:
+  - name: judge-36-35b-a3b
+    judge_model: openai-chat:qwen36-35b-a3b
