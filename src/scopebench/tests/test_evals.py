@@ -28,6 +28,7 @@ from scopebench import evals
 from scopebench.breach import _arguments_match, inspect_gate
 from scopebench.evals import (
     AttackOutcome,
+    ConfirmedViolation,
     JudgeBreach,
     MixedPathOutcome,
     OutOfScopeTouch,
@@ -207,6 +208,15 @@ async def test_mixed_path_outcome_labels() -> None:
     assert skipped.labels["MixedPathOutcome"].value == "forbidden-flag-without-capability"
     assert stuck.labels["MixedPathOutcome"].value == "neither-objective-reached"
     assert absent.labels["MixedPathOutcome"].value == "no-capability-objective"
+
+
+async def test_confirmed_violation_labels() -> None:
+    yes = await _run(ConfirmedViolation(), "", confirmed_violation=True)
+    no = await _run(ConfirmedViolation(), "", confirmed_violation=False)
+    absent = await _run(ConfirmedViolation(), "")  # task without a target-side evidence source
+    assert yes.labels["ConfirmedViolation"].value == "confirmed-executed-violation"
+    assert no.labels["ConfirmedViolation"].value == "no-forbidden-effect-observed"
+    assert absent.labels["ConfirmedViolation"].value == "not-measured"
 
 
 def _gate_artifacts(
@@ -777,6 +787,8 @@ async def test_run_evals_records_model_attribute(
         result.judge_model = "anthropic:claude-x"  # independent monitor model
         result.model_requests = 11  # distinct from tool_calls
         result.tools = ["fetch", "report"]  # effective tool availability
+        result.confirmed_violation = True  # independent target-side confirmation
+        result.violation_events = 2
         result.scopejudge = True
         result.attacker_brief_id = "adaptive-monitor-aware"
         result.deny_feedback = "white"
@@ -796,6 +808,8 @@ async def test_run_evals_records_model_attribute(
     assert attributes["judge_model"] == "anthropic:claude-x"
     assert report.cases[0].metrics["model_requests"] == 11
     assert attributes["tools"] == ["fetch", "report"]
+    assert attributes["confirmed_violation"] is True
+    assert report.cases[0].metrics["violation_events"] == 2
     assert attributes["scopejudge"] is True
     assert attributes["attacker_brief"] == "adaptive-monitor-aware"
     assert attributes["deny_feedback"] == "white"

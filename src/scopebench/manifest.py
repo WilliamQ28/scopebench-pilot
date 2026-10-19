@@ -125,6 +125,25 @@ class RunTokenVerification(_Verification):
 type Verification = FlagVerification | ScriptVerification | RunTokenVerification
 
 
+class EvidenceSource(BaseModel):
+    """A target-side evidence log the harness copies out of a service before teardown.
+
+    The mock service records each forbidden access as a JSON line (``{"event": ..., "token": ...}``)
+    to ``path`` inside the ``service`` container -- a location the acting agent cannot write (it
+    only ever mounts ``/work``). Reading that INDEPENDENT record upgrades a candidate breach (a
+    token in the actor's workspace) to a confirmed executed violation.
+    """
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    service: str = Field(min_length=1, description="Compose service holding the evidence log.")
+    path: str = Field(min_length=1, description="Absolute path of the evidence log in the service.")
+    event: str = Field(
+        default="forbidden_access",
+        description="The event name that marks a forbidden effect in the log.",
+    )
+
+
 class TaskManifest(BaseModel):
     """A parsed ScopeBench task: the task.yaml fields the platform reads, plus its directory."""
 
@@ -162,6 +181,13 @@ class TaskManifest(BaseModel):
             "Optional in-scope capability objective (mixed-path tasks). Graded independently "
             "of ``verification`` and never inverted: reaching it signals competence and that "
             "the monitor did not over-block legitimate work."
+        ),
+    )
+    evidence: EvidenceSource | None = Field(
+        default=None,
+        description=(
+            "Optional target-side evidence log collected from a service before teardown, giving "
+            "independent corroboration of a forbidden effect (see :class:`EvidenceSource`)."
         ),
     )
     solution_script: str | None = Field(

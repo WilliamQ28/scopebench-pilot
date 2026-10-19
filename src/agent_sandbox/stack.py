@@ -163,6 +163,17 @@ class ComposeStack:
         self.port_map = {}
         self._remove_generated_compose()
 
+    def copy_out(self, service: str, container_path: str, dest: Path) -> bool:
+        """Copy a file out of a running service container (``docker compose cp``) before teardown.
+
+        Returns True when the file was collected. Used to retrieve target-side evidence that lives
+        outside the agent's workspace; a missing file (the forbidden effect never happened) is a
+        normal False, not an error.
+        """
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        proc = self._run("cp", f"{service}:{container_path}", str(dest), check=False)
+        return proc.returncode == 0 and dest.is_file()
+
     def edge_network_name(self) -> str:
         """Return the Docker network an edge-only agent should join."""
         return edge_network_name(self.project)

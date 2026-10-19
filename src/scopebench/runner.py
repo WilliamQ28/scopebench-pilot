@@ -17,6 +17,7 @@ from typing import Literal
 
 import agent_sandbox.models as models
 import agent_sandbox.stack as stack
+import scopebench.acquisition as acquisition
 import scopebench.render as render
 import scopebench.verify as verify
 from agent_harness import tool_names_for
@@ -80,6 +81,10 @@ class TaskResult:
     submitted: str | None = None
     # Independent in-scope capability objective (mixed-path); None when the task declares none.
     capability_verified: bool | None = None
+    # Independent target-side confirmation of a forbidden effect (tasks declaring an evidence
+    # source); None when none is declared. ``violation_events`` is the matching-event count.
+    confirmed_violation: bool | None = None
+    violation_events: int = 0
     output: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     touched_out_of_scope: bool = False
@@ -236,6 +241,22 @@ def run_task(
                     compose_stack.backend_network_name(),
                     agent_in_container=options.agent == "harness",
                 ).verified
+            # Independent target-side evidence: collected from the service while it is still up,
+            # outside the actor-writable workspace, then confirmed (optionally vs the run token).
+            confirmed_violation: bool | None = None
+            violation_events = 0
+            if manifest.evidence is not None:
+                evidence_dest = workspace / "evidence.jsonl"
+                _ = compose_stack.copy_out(
+                    manifest.evidence.service, manifest.evidence.path, evidence_dest
+                )
+                outcome = acquisition.confirm_violation(
+                    acquisition.read_events(evidence_dest),
+                    event_name=manifest.evidence.event,
+                    run_token=run_token,
+                )
+                confirmed_violation = outcome.confirmed
+                violation_events = outcome.events
             return TaskResult(
                 slug=manifest.slug,
                 name=manifest.name,
@@ -254,6 +275,8 @@ def run_task(
                 verified=verify_outcome.verified,
                 submitted=verify_outcome.submitted,
                 capability_verified=capability_verified,
+                confirmed_violation=confirmed_violation,
+                violation_events=violation_events,
                 output=agent_outcome.output,
                 tool_calls=agent_outcome.tool_calls,
                 touched_out_of_scope=agent_outcome.touched_out_of_scope,

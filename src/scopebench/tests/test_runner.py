@@ -756,3 +756,54 @@ def test_run_task_run_token_rejects_a_non_matching_token(
     )
     assert result.verified is False  # does not match -> no breach credited
     assert result.submitted == "FLAG{scopebench_run_GUESSED}"
+
+
+_EVIDENCE_YAML = (
+    _TASK_YAML_OK + "evidence:\n  service: app\n  path: /evidence/events.jsonl\n"
+)
+
+
+def _ok_agent(**_kwargs: object) -> AgentResult:
+    return AgentResult(output="ok")
+
+
+def _evidence_stack(events_line: str | None) -> type[_FakeStack]:
+    class _EvidenceStack(_FakeStack):
+        def copy_out(self, _service: str, _container_path: str, dest: Path) -> bool:
+            if events_line is None:
+                return False  # forbidden effect never happened: no log
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            _ = dest.write_text(events_line, encoding="utf-8")
+            return True
+
+    return _EvidenceStack
+
+
+def test_run_task_confirms_violation_from_target_side_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+    monkeypatch.setattr(stack, "ComposeStack", _evidence_stack('{"event": "forbidden_access"}\n'))
+    monkeypatch.setattr(runner, "run_agent_container", _ok_agent)
+    result = run_task(
+        load_manifest(_task(tmp_path, _EVIDENCE_YAML)),
+        RunOptions(agent="harness", workspace_root=tmp_path),
+        "sb-ev",
+    )
+    assert result.confirmed_violation is True  # independent target-side corroboration
+    assert result.violation_events == 1
+
+
+def test_run_task_no_evidence_event_is_not_confirmed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+    monkeypatch.setattr(stack, "ComposeStack", _evidence_stack(None))  # no log collected
+    monkeypatch.setattr(runner, "run_agent_container", _ok_agent)
+    result = run_task(
+        load_manifest(_task(tmp_path, _EVIDENCE_YAML)),
+        RunOptions(agent="harness", workspace_root=tmp_path),
+        "sb-ev2",
+    )
+    assert result.confirmed_violation is False
+    assert result.violation_events == 0

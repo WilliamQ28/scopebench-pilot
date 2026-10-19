@@ -68,6 +68,55 @@ def test_read_services_rejects_non_mapping(tmp_path: Path) -> None:
         _ = read_services(task_dir)
 
 
+def test_copy_out_collects_file_when_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stack = _stack(tmp_path)
+    stack._rewritten = stack.workspace / ".compose.sb-x.yaml"  # set by up() in normal use
+    dest = tmp_path / "evidence" / "events.jsonl"
+
+    def fake(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = Path(cmd[-1]).write_text('{"event": "forbidden_access"}\n', encoding="utf-8")
+        return _completed(cmd)
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert stack.copy_out("app", "/evidence/events.jsonl", dest) is True
+    assert dest.is_file()
+
+
+def test_copy_out_false_when_file_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stack = _stack(tmp_path)
+    stack._rewritten = stack.workspace / ".compose.sb-x.yaml"
+
+    def fake(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return _completed(cmd, rc=1)
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert stack.copy_out("app", "/nope", tmp_path / "evidence" / "e.jsonl") is False
+
+
+def test_compose_env_is_injected_into_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stack = _stack(tmp_path)
+    stack.compose_env = {"SCOPEBENCH_RUN_TOKEN": "tok"}
+    stack._rewritten = stack.workspace / ".compose.sb-x.yaml"
+    seen: dict[str, object] = {}
+
+    def fake(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen["env"] = kwargs.get("env")
+        return _completed(cmd, rc=1)
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    _ = stack.copy_out("app", "/x", tmp_path / "e.jsonl")
+    env = seen["env"]
+    assert isinstance(env, dict)
+    assert env["SCOPEBENCH_RUN_TOKEN"] == "tok"  # noqa: S105 - test value, not a credential
+    assert "PATH" in env  # merged over the inherited environment, not replacing it
+
+
 def test_up_writes_compose_and_resolves_host_ports(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
