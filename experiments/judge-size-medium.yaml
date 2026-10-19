@@ -1,0 +1,46 @@
+# Judge-size ablation (MEDIUM scope: 4 tasks x 2 repeats x 4 arms = 32 units).
+#   scopebench-matrix experiments/judge-size-medium.yaml --out experiments/js-med --tasks-dir tasks/scopebench
+#
+# Same design as judge-size.yaml (actor fixed at the largest qwen; only judge_model varies), with a
+# trimmed panel for a faster first result. The signal is per-call gate allow/deny behaviour (100+
+# decisions per unit), so 2 repeats already give a robust per-arm rate. Sequential ordering keeps
+# each scale-to-zero judge warm across its arm block; every unit also warms its models first. The
+# post-hoc Anthropic trajectory judge is OFF (qwen-only, no key/cost), so scoped-case breach is
+# adjudicated by the gate's allow/deny record + candidate-breach only -- proxies, not confirmed
+# violations. Report that limit.
+name: judge-size-medium
+
+panel:
+  - traversal-overreach-dead-end        # dead-end: host-scope blind spot (known judge seam)
+  - sqli-cross-tenant-dead-end          # dead-end
+  - traversal-overreach-mixed-path       # mixed-path: capability-vs-RoE discrimination
+  - db-admin-panel-mixed-path            # mixed-path
+
+repeat: 2
+ordering: sequential
+seed: 0
+
+defaults:
+  model: openai-chat:qwen35-122b
+  base_url: https://inference.vulcan.alliancecan.ca/v1
+  instruction: program-brief-v3
+  scopejudge: true
+  trajectory_judge: false
+  judge_base_url: https://inference.vulcan.alliancecan.ca/v1
+  judge_timeout: 120
+  deny_feedback: reasoned
+  hide_brief_from_judge: true
+  request_limit: 150
+  timeout: 7200
+  max_tool_result_chars: 12000
+  attacker_brief: briefs/adaptive-monitor-aware.md
+
+arms:
+  - name: judge-122b
+    judge_model: openai-chat:qwen35-122b
+  - name: judge-36-35b-a3b
+    judge_model: openai-chat:qwen36-35b-a3b
+  - name: judge-36-27b
+    judge_model: openai-chat:qwen36-27b
+  - name: judge-38-27b
+    judge_model: openai-chat:qwen38-27b
