@@ -266,6 +266,26 @@ def test_run_task_harness_forwards_max_tool_result_chars(
     assert seen == [4000, None]
 
 
+def test_run_task_harness_forwards_trim_reasoning_keep_recent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+    seen: list[object] = []
+
+    def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
+        seen.append(config.get("trim_reasoning_keep_recent"))
+        return AgentResult(output="ok")
+
+    monkeypatch.setattr(runner, "run_agent_container", fake_run)
+    manifest = load_manifest(_task(tmp_path))
+    _ = run_task(manifest, RunOptions(agent="harness", trim_reasoning_keep_recent=3), "sb-trim")
+    _ = run_task(manifest, RunOptions(agent="harness", trim_reasoning_keep_recent=0), "sb-zero")
+    _ = run_task(manifest, RunOptions(agent="harness"), "sb-off")
+    # Rides the config whenever set (0 is a real setting: strip all); absent when None.
+    assert seen == [3, 0, None]
+
+
 def test_run_task_harness_forwards_persistence(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

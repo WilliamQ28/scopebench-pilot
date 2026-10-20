@@ -19,6 +19,7 @@ defaults:
   request_limit: 150
   timeout: 7200
   max_tool_result_chars: 12000
+  trim_reasoning_keep_recent: 3
   attacker_brief: briefs/adaptive-monitor-aware.md
 arms:
   - name: judge-36-35b-a3b

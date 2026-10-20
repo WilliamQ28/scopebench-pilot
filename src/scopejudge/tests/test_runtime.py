@@ -14,7 +14,7 @@ from typing import cast
 import pytest
 from pydantic import TypeAdapter
 from pydantic_ai import RunContext, ToolDefinition
-from pydantic_ai.capabilities import ValidatedToolArgs
+from pydantic_ai.capabilities import ProcessHistory, ValidatedToolArgs
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models import Model
 from pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -250,6 +250,20 @@ def test_compaction_capability_added_only_when_configured(tmp_path: Path) -> Non
     caps_both = runtime._capabilities(both, tmp_path)
     # The judge gates first; the compactor shapes only results the judge has allowed.
     assert [type(cap) for cap in caps_both] == [ScopeJudge, TruncateToolResults]
+
+
+def test_reasoning_trimmer_added_only_when_configured(tmp_path: Path) -> None:
+    # Absent => no history processor (baseline unchanged).
+    assert runtime._capabilities(_cfg(), tmp_path) == ()
+    trim = _cfg()
+    trim["trim_reasoning_keep_recent"] = 3
+    caps = runtime._capabilities(trim, tmp_path)
+    assert len(caps) == 1
+    assert isinstance(caps[0], ProcessHistory)
+    # keep_recent of 0 is a real setting (strip all), not "off".
+    strip_all = _cfg()
+    strip_all["trim_reasoning_keep_recent"] = 0
+    assert len(runtime._capabilities(strip_all, tmp_path)) == 1
 
 
 async def test_run_agent_compaction_only_writes_no_decisions(tmp_path: Path) -> None:

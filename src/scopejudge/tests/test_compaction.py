@@ -8,10 +8,24 @@ from typing import cast
 import pytest
 from pydantic_ai import RunContext, ToolDefinition
 from pydantic_ai.capabilities import ValidatedToolArgs
-from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ThinkingPart,
+    ToolCallPart,
+    ToolReturnPart,
+)
 
 from agent_harness import HarnessDeps
-from scopejudge.compaction import MIN_RESULT_BUDGET, TruncateToolResults, _safe_name
+from scopejudge.compaction import (
+    MIN_RESULT_BUDGET,
+    TruncateToolResults,
+    _safe_name,
+    make_reasoning_trimmer,
+    trim_reasoning,
+)
 
 
 def _cap(max_chars: int = 300, cache_dir: Path | None = None) -> TruncateToolResults:
@@ -124,3 +138,64 @@ async def test_wrap_tool_execute_passes_non_string_results_through() -> None:
         handler=handler,
     )
     assert out is payload  # non-string results are left exactly as the tool returned them
+
+
+def _resp(think: str, call_id: str) -> ModelResponse:
+    return ModelResponse(
+        parts=[ThinkingPart(content=think), _call(call_id)]
+    )
+
+
+def _ret(call_id: str) -> ModelRequest:
+    return ModelRequest(
+        parts=[ToolReturnPart(tool_name="bash", content="out", tool_call_id=call_id)]
+    )
+
+
+def _kinds(msg: ModelMessage) -> list[str]:
+    return [part.part_kind for part in msg.parts]
+
+
+def _history() -> list[ModelMessage]:
+    # three responses (each thinking + tool-call) interleaved with their tool returns
+    return [_resp("t1", "1"), _ret("1"), _resp("t2", "2"), _ret("2"), _resp("t3", "3")]
+
+
+def test_trim_reasoning_keeps_only_recent_thinking() -> None:
+    out = trim_reasoning(_history(), keep_recent=1)
+    assert len(out) == 5  # nothing dropped, only reshaped
+    assert "thinking" not in _kinds(out[0])  # oldest response: reasoning stripped
+    assert "tool-call" in _kinds(out[0])  # ... but its action is preserved
+    assert "thinking" not in _kinds(out[2])  # middle response: stripped too
+    assert "thinking" in _kinds(out[4])  # most recent response: reasoning kept
+
+
+def test_trim_reasoning_leaves_tool_returns_untouched() -> None:
+    out = trim_reasoning(_history(), keep_recent=1)
+    assert _kinds(out[1]) == ["tool-return"]  # request messages are never altered
+    assert _kinds(out[3]) == ["tool-return"]
+
+
+def test_trim_reasoning_zero_strips_all_reasoning() -> None:
+    out = trim_reasoning(_history(), keep_recent=0)
+    assert all("thinking" not in _kinds(m) for m in out if isinstance(m, ModelResponse))
+
+
+def test_trim_reasoning_never_empties_a_response() -> None:
+    only_thought = ModelResponse(parts=[ThinkingPart(content="sole")])
+    out = trim_reasoning([only_thought], keep_recent=0)
+    assert _kinds(out[0]) == ["thinking"]  # stripping would empty it, so it is kept as-is
+
+
+def test_trim_reasoning_keeps_non_thinking_response_unchanged() -> None:
+    plain = ModelResponse(parts=[TextPart(content="done")])
+    out = trim_reasoning([plain], keep_recent=0)
+    assert out[0] is plain  # no thinking to strip -> same object, untouched
+
+
+def test_make_reasoning_trimmer_builds_a_processor() -> None:
+    processor = make_reasoning_trimmer(1)
+    history = _history()
+    assert [_kinds(m) for m in processor(history)] == [
+        _kinds(m) for m in trim_reasoning(history, keep_recent=1)
+    ]

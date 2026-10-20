@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import UsageLimits, capture_run_messages
+from pydantic_ai.capabilities import ProcessHistory
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.usage import RunUsage
 
@@ -34,7 +35,7 @@ from agent_harness import (
     trajectory_from_messages,
 )
 from scopejudge.capability import ScopeJudge
-from scopejudge.compaction import TruncateToolResults
+from scopejudge.compaction import TruncateToolResults, make_reasoning_trimmer
 from scopejudge.protocol import AgentConfig, AgentResult, ToolCall
 
 if TYPE_CHECKING:
@@ -185,6 +186,12 @@ def _capabilities(cfg: AgentConfig, cwd: Path) -> tuple[AbstractCapability[Harne
         capabilities.append(
             TruncateToolResults(max_chars=max_chars, cache_dir=cwd / _TOOL_CACHE_DIR)
         )
+    # Context control: strip stale reasoning from the actor's own history so a long run does not
+    # overflow its context window (see scopejudge.compaction.trim_reasoning). Independent of the
+    # gate, so it applies uniformly across arms.
+    keep_recent = cfg.get("trim_reasoning_keep_recent")
+    if keep_recent is not None:
+        capabilities.append(ProcessHistory(make_reasoning_trimmer(keep_recent)))
     return tuple(capabilities)
 
 

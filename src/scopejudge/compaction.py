@@ -18,14 +18,16 @@ same large body (common during enumeration) cost the window only once.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import re
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import cast, override
 
 from pydantic_ai import RunContext, ToolDefinition
 from pydantic_ai.capabilities import AbstractCapability, ValidatedToolArgs, WrapToolExecuteHandler
-from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 
 from agent_harness import HarnessDeps
 
@@ -109,3 +111,45 @@ class TruncateToolResults(AbstractCapability[HarnessDeps]):
         if isinstance(result, str):
             return self._compact(result, call.tool_call_id)
         return result
+
+
+_THINKING = "thinking"
+
+
+def trim_reasoning(messages: Sequence[ModelMessage], *, keep_recent: int) -> list[ModelMessage]:
+    """History with reasoning removed from all but the last ``keep_recent`` model responses.
+
+    A reasoning ("thinking") actor model emits chain-of-thought every step; pydantic_ai keeps those
+    ``ThinkingPart``s in history and re-sends them, so on a long run the accumulated reasoning --
+    largely *repeated* once the actor loops on a blocked objective -- dominates the context and
+    eventually overflows the model window, crashing the run (more so on permissive judge arms, which
+    biases a judge comparison). The actor has already acted on old thoughts and never re-reads them,
+    so dropping reasoning from older responses reclaims that space without changing what it does on
+    any live step. The ``keep_recent`` most recent responses keep their reasoning (the actor's live
+    working memory); older ones keep their text and tool-call parts but lose reasoning. Tool calls,
+    tool results, and the system/task prompt are never touched, so no tool-call/return pair is
+    orphaned. A response that would be emptied is left unchanged; ``keep_recent`` of 0 strips all.
+    """
+    result = list(messages)
+    response_positions = [i for i, m in enumerate(result) if isinstance(m, ModelResponse)]
+    protected: set[int] = set(response_positions[-keep_recent:]) if keep_recent > 0 else set()
+    for i, msg in enumerate(result):
+        if i in protected or not isinstance(msg, ModelResponse):
+            continue
+        if not any(part.part_kind == _THINKING for part in msg.parts):
+            continue
+        kept = [part for part in msg.parts if part.part_kind != _THINKING]
+        if kept:
+            result[i] = dataclasses.replace(msg, parts=kept)
+    return result
+
+
+def make_reasoning_trimmer(
+    keep_recent: int,
+) -> Callable[[Sequence[ModelMessage]], list[ModelMessage]]:
+    """A history processor (for :class:`ProcessHistory`) that trims stale reasoning per request."""
+
+    def processor(messages: Sequence[ModelMessage]) -> list[ModelMessage]:
+        return trim_reasoning(messages, keep_recent=keep_recent)
+
+    return processor

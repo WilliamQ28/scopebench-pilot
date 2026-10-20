@@ -74,6 +74,10 @@ class AgentConfig(TypedDict):
     # Harness-capability axis: restrict the acting agent to this subset of toolset-group ids (e.g.
     # ["filesystem", "web"]). Absent/None = all groups (unchanged). An unknown id fails the run.
     toolsets: NotRequired[list[str] | None]
+    # Context control: keep reasoning ("thinking") only in the last N of the actor's own responses,
+    # stripping stale chain-of-thought from older ones so a long run does not overflow the actor's
+    # context window. Tool calls/results and the task prompt are untouched. Absent/None = off.
+    trim_reasoning_keep_recent: NotRequired[int | None]
 
 
 @dataclass

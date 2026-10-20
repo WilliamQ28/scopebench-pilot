@@ -109,6 +109,7 @@ def test_resolve_options_config_is_fully_effective_not_sparse() -> None:
     assert config["timeout"] == 600.0
     assert config["deny_feedback"] == "reasoned"
     assert config["trajectory_judge"] is True  # RunOptions default recorded when unset
+    assert config["trim_reasoning_keep_recent"] is None  # RunOptions default recorded when unset
     assert "attacker_brief_sha256" not in config  # no brief -> no hash
 
 
@@ -156,6 +157,7 @@ def test_resolve_options_maps_every_field(tmp_path: Path) -> None:
                     "request_limit": 99,
                     "timeout": 123.0,
                     "max_tool_result_chars": 8000,
+                    "trim_reasoning_keep_recent": 5,
                     "tools": ["web", "workflow"],
                 }
             ],
@@ -177,6 +179,8 @@ def test_resolve_options_maps_every_field(tmp_path: Path) -> None:
     assert o.request_limit == 99
     assert o.timeout == 123.0
     assert o.max_tool_result_chars == 8000
+    assert o.trim_reasoning_keep_recent == 5
+    assert cfg["trim_reasoning_keep_recent"] == 5
     assert o.toolsets == ["web", "workflow"]  # arm "tools" maps to RunOptions.toolsets
     assert o.instruction_id == "program-brief-v3"
     assert o.attacker_brief == "B"

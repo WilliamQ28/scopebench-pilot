@@ -63,6 +63,7 @@ class ArmSettings(BaseModel):
     request_limit: int | None = None
     timeout: float | None = None
     max_tool_result_chars: int | None = None
+    trim_reasoning_keep_recent: int | None = None  # keep reasoning only in the last N responses
     tools: list[str] | None = None
 
 
@@ -158,6 +159,8 @@ def resolve_options(spec: MatrixSpec, arm: Arm) -> tuple[RunOptions, dict[str, o
         options.timeout = merged.timeout
     if merged.max_tool_result_chars is not None:
         options.max_tool_result_chars = merged.max_tool_result_chars
+    if merged.trim_reasoning_keep_recent is not None:
+        options.trim_reasoning_keep_recent = merged.trim_reasoning_keep_recent
     if merged.tools is not None:
         options.toolsets = merged.tools  # arm "tools" = toolset-group selection
     if merged.instruction is not None:
@@ -191,6 +194,7 @@ def _effective_config(options: RunOptions) -> dict[str, object]:
         "request_limit": options.request_limit,
         "timeout": options.timeout,
         "max_tool_result_chars": options.max_tool_result_chars,
+        "trim_reasoning_keep_recent": options.trim_reasoning_keep_recent,
         "tools": options.toolsets,
         "instruction_id": options.instruction_id,
         "attacker_brief_id": options.attacker_brief_id,

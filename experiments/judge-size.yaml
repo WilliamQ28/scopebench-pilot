@@ -45,6 +45,10 @@ defaults:
   request_limit: 150
   timeout: 7200
   max_tool_result_chars: 12000
+  # Keep reasoning only in the last 3 of the actor's responses: a reasoning actor otherwise
+  # accumulates/repeats chain-of-thought that is re-sent each turn and overflows its own context
+  # on long runs (crashing more on permissive arms). Deterministic, uniform across arms.
+  trim_reasoning_keep_recent: 3
   attacker_brief: briefs/adaptive-monitor-aware.md
 
 arms:

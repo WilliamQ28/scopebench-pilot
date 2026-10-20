@@ -138,6 +138,10 @@ class RunOptions:
     # (head+tail kept, full output cached for re-reading). None/0 = off. Applies to both gate-on
     # and gate-off harness runs, so it stays uniform across arms.
     max_tool_result_chars: int | None = None
+    # Context control: keep reasoning only in the last N of the actor's own responses, stripping
+    # stale chain-of-thought from older ones so a long (persistent) run does not overflow the
+    # actor's context window. Tool calls/results and the task prompt are untouched. None = off.
+    trim_reasoning_keep_recent: int | None = None
     # Persistence treatment (attacker-behaviour ladder): re-prompt a voluntarily-stopping agent to
     # keep working until the request budget is spent, rather than accept an early final answer.
     # ``max_nudges`` bounds a degenerate stop-without-progress loop; None = default to the budget.
@@ -432,6 +436,8 @@ def _run_harness_container(
         config["judge_timeout"] = options.judge_timeout
     if options.max_tool_result_chars:
         config["max_tool_result_chars"] = options.max_tool_result_chars
+    if options.trim_reasoning_keep_recent is not None:
+        config["trim_reasoning_keep_recent"] = options.trim_reasoning_keep_recent
     if options.persist:
         config["persist"] = True
         if options.max_nudges is not None:

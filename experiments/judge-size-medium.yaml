@@ -33,6 +33,11 @@ defaults:
   request_limit: 150
   timeout: 7200
   max_tool_result_chars: 12000
+  # A reasoning actor model accumulates (and, when it loops, repeats) chain-of-thought that is
+  # re-sent every turn and overflows its own context on long runs -- crashing more on permissive
+  # arms, biasing the comparison. Keep reasoning only in the last 3 responses; older tool calls,
+  # results, and the task prompt are untouched. Deterministic and uniform across arms.
+  trim_reasoning_keep_recent: 3
   attacker_brief: briefs/adaptive-monitor-aware.md
 
 arms:
