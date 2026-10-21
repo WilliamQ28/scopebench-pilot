@@ -15,13 +15,16 @@ all testable offline with no model calls. :func:`build_executor` wires the real
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import os
 import random
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -365,6 +368,7 @@ def run_matrix(
     execute: Callable[[ResolvedRun, Path], ExecResult],
     revision: str | None = None,
     now: Callable[[], str] = _utcnow,
+    concurrency: int = 1,
 ) -> Ledger:
     """Execute (or resume) the matrix, recording status in a crash-safe ledger.
 
@@ -374,6 +378,12 @@ def run_matrix(
     on resume. Every attempt receives a fresh directory under ``attempts/<run_id>/`` for reports
     and workspaces. Its status and errors remain in ``RunRecord.attempts`` across retries and
     interruptions. Completed units are skipped; the ledger is written after every status change.
+
+    With ``concurrency > 1``, the units of each arm run through a thread pool of that size while the
+    arms themselves stay sequential -- so only one judge model is pulled warm at a time (the
+    self-hosted endpoint scales idle models to zero), and the concurrent units of a warm arm share
+    its batched endpoint capacity. Ledger reads/writes are serialised by a lock; a per-unit failure
+    still never aborts the matrix. ``concurrency = 1`` keeps the exact serial, planned-order run.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     units = plan(spec)
@@ -381,30 +391,37 @@ def run_matrix(
         out_dir, spec, units, revision=revision or code_revision(), now=now()
     )
     ledger.save()
-    for run in units:
-        record = ledger.runs[run.run_id]
-        if record.status == "completed":
-            continue
-        # Preserve pre-history ledgers too, before clearing the latest attempt's state.
-        if not record.attempts and record.status != "pending":
+    lock = threading.Lock()
+
+    def process(run: ResolvedRun) -> None:
+        with lock:
+            record = ledger.runs[run.run_id]
+            if record.status == "completed":
+                return
+            # Preserve pre-history ledgers too, before clearing the latest attempt's state.
+            if not record.attempts and record.status != "pending":
+                record.attempts.append(AttemptRecord.model_validate(record.model_dump()))
+            attempts_dir = out_dir / "attempts" / run.run_id
+            attempts_dir.mkdir(parents=True, exist_ok=True)
+            attempt_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=attempts_dir))
+            record.status = "running"
+            record.started = now()
+            record.evidence_dir = str(attempt_dir)
+            record.ended = record.report = record.error = None
+            record.cases = record.failures = record.expected = 0
             record.attempts.append(AttemptRecord.model_validate(record.model_dump()))
-        attempts_dir = out_dir / "attempts" / run.run_id
-        attempts_dir.mkdir(parents=True, exist_ok=True)
-        attempt_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=attempts_dir))
-        record.status = "running"
-        record.started = now()
-        record.evidence_dir = str(attempt_dir)
-        record.ended = record.report = record.error = None
-        record.cases = record.failures = record.expected = 0
-        attempt = AttemptRecord.model_validate(record.model_dump())
-        record.attempts.append(attempt)
-        ledger.save()
+            ledger.save()
         try:
             result = execute(run, attempt_dir)
         except Exception as exc:  # noqa: BLE001 - one unit's failure must not abort the matrix
-            record.status = "error"
-            record.error = f"{type(exc).__name__}: {exc}"
-        else:
+            with lock:
+                record.status = "error"
+                record.error = f"{type(exc).__name__}: {exc}"
+                record.ended = now()
+                record.attempts[-1] = AttemptRecord.model_validate(record.model_dump())
+                ledger.save()
+            return
+        with lock:
             record.report = str(result.report) if result.report is not None else None
             record.cases, record.failures, record.expected = (
                 result.cases,
@@ -419,9 +436,23 @@ def run_matrix(
                     f"incomplete: graded {result.cases}/{result.expected} cases, "
                     + f"{result.failures} failure(s)"
                 )
-        record.ended = now()
-        record.attempts[-1] = AttemptRecord.model_validate(record.model_dump())
-        ledger.save()
+            record.ended = now()
+            record.attempts[-1] = AttemptRecord.model_validate(record.model_dump())
+            ledger.save()
+
+    if concurrency <= 1:
+        for run in units:
+            process(run)
+    else:
+        # Arm-major grouping keeps arms sequential (one warm judge at a time) while the arm's own
+        # units run concurrently -- independent of the planned ordering, which may interleave arms.
+        by_arm: dict[str, list[ResolvedRun]] = {}
+        for run in units:
+            by_arm.setdefault(run.arm, []).append(run)
+        for arm_units in by_arm.values():
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                for _ in pool.map(process, arm_units):
+                    pass
     return ledger
 
 
@@ -461,9 +492,12 @@ def build_executor(
 
     def execute(run: ResolvedRun, out_dir: Path) -> ExecResult:
         manifest = load_manifest(tasks_dir / run.task)
-        options = run.options
+        # plan() shares one RunOptions across an arm's units, so per-unit state (the workspace) is
+        # set on a COPY -- never mutate the shared object, which concurrent arm-mates also read.
+        options = dataclasses.replace(
+            run.options, workspace_root=out_dir / "workspaces" / run.run_id
+        )
         warm_up(endpoints_for(options), probe=active_probe)
-        options.workspace_root = out_dir / "workspaces" / run.run_id
         report = asyncio.run(run_evals([manifest], options, repeat=1, progress=False))
         data = report_to_json(report)
         report_path = out_dir / f"{run.run_id}.json"
@@ -495,6 +529,12 @@ def main(argv: list[str] | None = None) -> int:
     _ = parser.add_argument(
         "--tasks-dir", type=Path, required=True, help="task directory root (holds the panel slugs)"
     )
+    _ = parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="units run per arm at once (arms stay sequential; default 1 = serial)",
+    )
     args = parser.parse_args(argv)
     # Populate os.environ from ./.env (real env vars still win) so the actor/judge endpoint
     # credentials reach the run, matching the plain `scopebench` CLI. Without this a matrix run
@@ -502,7 +542,12 @@ def main(argv: list[str] | None = None) -> int:
     _ = load_dotenv(dotenv_path=Path.cwd() / ".env", override=False)
     spec = load_spec(cast("Path", args.spec))
     out_dir = cast("Path", args.out)
-    ledger = run_matrix(spec, out_dir, execute=build_executor(cast("Path", args.tasks_dir)))
+    ledger = run_matrix(
+        spec,
+        out_dir,
+        execute=build_executor(cast("Path", args.tasks_dir)),
+        concurrency=cast("int", args.concurrency),
+    )
     done = sum(1 for record in ledger.runs.values() if record.status == "completed")
     errored = sum(1 for record in ledger.runs.values() if record.status == "error")
     print(f"matrix '{spec.name}': {done} completed, {errored} errored; ledger at {ledger.path}")

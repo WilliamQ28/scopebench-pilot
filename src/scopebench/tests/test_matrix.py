@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import subprocess
+import threading
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar, cast
@@ -443,6 +446,9 @@ def test_build_executor_runs_pipeline_and_saves_report(
     assert result.ok
     assert str(seen["task_dir"]).endswith("tasks/task-x")
     assert str(seen["workspace_root"]).endswith("workspaces/a__t__r1")
+    # The per-unit workspace is set on a COPY; the shared RunOptions is never mutated (so concurrent
+    # arm-mates that share it do not race).
+    assert run.options.workspace_root != seen["workspace_root"]
 
 
 def test_endpoints_for_selects_self_hosted_actor_and_judge() -> None:
@@ -538,6 +544,73 @@ def test_build_executor_warms_models_before_running(
     _ = execute(run, out)
     assert probed == ["qwen35-122b", "qwen36-27b"]  # both warmed
     assert order == ["warm", "warm", "run"]  # warming happens BEFORE the pipeline runs
+
+
+def test_run_matrix_concurrency_parallelises_within_arm_only(tmp_path: Path) -> None:
+    # 2 arms x 2 tasks x 1 rep = 4 units, 2 per arm. With concurrency 2, the two units of an arm run
+    # at once (a Barrier of 2 only clears if they do), but the two ARMS never overlap (sequential,
+    # so the warm judge invariant holds).
+    spec = MatrixSpec.model_validate(
+        {
+            "name": "c",
+            "panel": ["t1", "t2"],
+            "repeat": 1,
+            "ordering": "sequential",
+            "arms": [{"name": "a1"}, {"name": "a2"}],
+        }
+    )
+    barrier = threading.Barrier(2, timeout=5)
+    arm_running: Counter[str] = Counter()
+    stats = {"running": 0, "max_units": 0, "max_arms": 0}
+    lock = threading.Lock()
+
+    def execute(run: ResolvedRun, out: Path) -> ExecResult:
+        with lock:
+            stats["running"] += 1
+            stats["max_units"] = max(stats["max_units"], stats["running"])
+            arm_running[run.arm] += 1
+            stats["max_arms"] = max(stats["max_arms"], sum(1 for n in arm_running.values() if n))
+        # The barrier only clears if two units of this arm are in execute() at once; a timeout
+        # (concurrency regression) is suppressed so the test fails on the assertion, not a hang.
+        with contextlib.suppress(threading.BrokenBarrierError):
+            _ = barrier.wait()
+        with lock:
+            stats["running"] -= 1
+            arm_running[run.arm] -= 1
+        return ExecResult(report=out / f"{run.run_id}.json", cases=1, failures=0, expected=1)
+
+    ledger = run_matrix(spec, tmp_path, execute=execute, revision="rev", concurrency=2)
+    done = [r for r in ledger.runs.values() if r.status == "completed"]
+    assert len(done) == 4  # every unit ran and completed
+    assert stats["max_units"] == 2  # two units of an arm ran concurrently
+    assert stats["max_arms"] == 1  # ... but never two arms at once (judge stays warm one at a time)
+
+
+def test_main_forwards_concurrency(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    spec_path = tmp_path / "m.yaml"
+    _ = spec_path.write_text(_SPEC_YAML, encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def fake_build(_tasks_dir: Path) -> _Executor:
+        def execute(run: ResolvedRun, out: Path) -> ExecResult:
+            return ExecResult(report=out / f"{run.run_id}.json", cases=1, failures=0, expected=1)
+
+        return execute
+
+    def fake_run_matrix(
+        _spec: MatrixSpec, _out: Path, *, concurrency: int = 1, **_kw: object
+    ) -> matrix.Ledger:
+        seen["concurrency"] = concurrency
+        return matrix.Ledger({}, "rev", "now", {}, tmp_path / "ledger.json")
+
+    monkeypatch.setattr(matrix, "build_executor", fake_build)
+    monkeypatch.setattr(matrix, "run_matrix", fake_run_matrix)
+    monkeypatch.chdir(tmp_path)
+    _ = matrix.main(
+        [str(spec_path), "--out", str(tmp_path / "o"), "--tasks-dir", str(tmp_path / "t"),
+         "--concurrency", "4"]
+    )
+    assert seen["concurrency"] == 4
 
 
 def test_main_runs_matrix_and_writes_ledger(

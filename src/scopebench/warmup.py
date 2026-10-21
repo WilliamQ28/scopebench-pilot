@@ -62,7 +62,7 @@ def warm_up(
     probe: Probe,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
-    deadline_s: float = 600.0,
+    deadline_s: float = 1800.0,
     poll_s: float = 20.0,
 ) -> None:
     """Poll each distinct endpoint until it serves; raise if one never does within ``deadline_s``.
