@@ -29,10 +29,20 @@ from scopebench.matrix import (
     resolve_options,
     run_matrix,
 )
+from scopebench.memory import MemoryPolicy, MemorySample
 from scopebench.runner import RunOptions
 from scopebench.warmup import Endpoint
 
 _Executor = Callable[[ResolvedRun, Path], ExecResult]
+
+
+@pytest.fixture(autouse=True)
+def offline_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    def sample(_paths: dict[str, Path]) -> MemorySample:
+        return MemorySample(0, 8192)
+
+    monkeypatch.setattr(matrix, "sample_memory", sample)
+
 
 _SPEC_YAML = """
 name: smoke
@@ -607,8 +617,15 @@ def test_main_forwards_concurrency(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     monkeypatch.setattr(matrix, "run_matrix", fake_run_matrix)
     monkeypatch.chdir(tmp_path)
     _ = matrix.main(
-        [str(spec_path), "--out", str(tmp_path / "o"), "--tasks-dir", str(tmp_path / "t"),
-         "--concurrency", "4"]
+        [
+            str(spec_path),
+            "--out",
+            str(tmp_path / "o"),
+            "--tasks-dir",
+            str(tmp_path / "t"),
+            "--concurrency",
+            "4",
+        ]
     )
     assert seen["concurrency"] == 4
 
@@ -634,9 +651,7 @@ def test_main_runs_matrix_and_writes_ledger(
     assert "completed" in capsys.readouterr().out
 
 
-def test_main_loads_dotenv_from_cwd(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_main_loads_dotenv_from_cwd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # A matrix launched from a bare shell must still pick up the endpoint credentials from ./.env,
     # like the plain `scopebench` CLI, or the actor/judge would have no OPENAI_API_KEY/base URL.
     spec_path = tmp_path / "m.yaml"
@@ -674,3 +689,134 @@ def test_main_returns_nonzero_on_errors(monkeypatch: pytest.MonkeyPatch, tmp_pat
         [str(spec_path), "--out", str(tmp_path / "o"), "--tasks-dir", str(tmp_path / "t")]
     )
     assert rc == 1
+
+
+@pytest.mark.parametrize("concurrency", [1, 4])
+def test_memory_admission_waits_for_headroom_and_records_policy(
+    tmp_path: Path, concurrency: int
+) -> None:
+    samples = 0
+    calls: list[str] = []
+
+    def probe(_paths: dict[str, Path]) -> MemorySample:
+        nonlocal samples
+        samples += 1
+        return MemorySample(0, 0 if samples == 1 else 8192)
+
+    def execute(run: ResolvedRun, _out: Path) -> ExecResult:
+        assert samples >= 2  # low-headroom probe must not start anything
+        calls.append(run.run_id)
+        return ExecResult(cases=1, expected=1)
+
+    spec = _spec(panel=["t"], arms=[Arm(name="a")], repeat=1)
+    policy = MemoryPolicy(poll_seconds=0.001)
+    ledger = run_matrix(
+        spec,
+        tmp_path,
+        execute=execute,
+        revision="r",
+        concurrency=concurrency,
+        memory_policy=policy,
+        memory_probe=probe,
+    )
+    assert calls == ["a__t__r1"]
+    assert ledger.runs["a__t__r1"].status == "completed"
+    assert ledger.scheduler_history[-1]["concurrency"] == concurrency
+    assert ledger.scheduler_history[-1]["memory_policy"] is not None
+    run_matrix(
+        spec,
+        tmp_path,
+        execute=execute,
+        revision="r",
+        concurrency=concurrency,
+        memory_policy=policy,
+        memory_probe=probe,
+    )
+    assert len(calls) == 1  # memory-aware resume still skips completed work
+    with pytest.raises(ValueError, match="Concurrency"):
+        run_matrix(
+            spec,
+            tmp_path,
+            execute=execute,
+            revision="r",
+            concurrency=0,
+            memory_policy=policy,
+            memory_probe=probe,
+        )
+
+
+def test_memory_reservations_prevent_simultaneous_startup_oversubscription(tmp_path: Path) -> None:
+    lock = threading.Lock()
+    stats = {"active": 0, "peak": 0}
+    release = threading.Event()
+    observed = False
+
+    def execute(_run: ResolvedRun, _out: Path) -> ExecResult:
+        with lock:
+            stats["active"] += 1
+            stats["peak"] = max(stats["peak"], stats["active"])
+        assert release.wait(5)
+        with lock:
+            stats["active"] -= 1
+        return ExecResult(cases=1, expected=1)
+
+    def probe(paths: dict[str, Path]) -> MemorySample:
+        nonlocal observed
+        if paths:
+            observed = True
+            release.set()
+        return MemorySample(300 * len(paths), 8192, dict.fromkeys(paths, 300.0))
+
+    policy = MemoryPolicy(
+        budget_mib=1024, overhead_mib=128, default_task_mib=384, poll_seconds=0.005
+    )
+    ledger = run_matrix(
+        _spec(panel=["t1", "t2", "t3", "t4"], arms=[Arm(name="a")], repeat=1),
+        tmp_path,
+        execute=execute,
+        revision="r",
+        concurrency=4,
+        memory_policy=policy,
+        memory_probe=probe,
+    )
+    assert observed
+    assert 1 <= stats["peak"] <= 2  # four workers exist, but only two reservations fit
+    assert all(r.status == "completed" for r in ledger.runs.values())
+    assert policy.peaks
+
+
+def test_memory_probe_failure_never_launches_work(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def broken(_paths: dict[str, Path]) -> MemorySample:
+        raise RuntimeError("Docker statistics unavailable")
+
+    with pytest.raises(RuntimeError, match="statistics"):
+        run_matrix(
+            _spec(),
+            tmp_path,
+            execute=_fake_execute(calls),
+            revision="r",
+            memory_policy=MemoryPolicy(),
+            memory_probe=broken,
+        )
+    assert calls == []
+
+
+@pytest.mark.parametrize("value", ["t=0", "t=-1", "=512", "t", "t=nan"])
+def test_bad_task_memory_argument(value: str) -> None:
+    with pytest.raises(ValueError, match="Expected"):
+        matrix.task_memory_argument(value)
+
+
+def test_task_memory_argument() -> None:
+    assert matrix.task_memory_argument("heavy=768") == ("heavy", 768)
+
+
+@pytest.mark.parametrize("flag", ["--memory-budget-mib", "--concurrency"])
+def test_cli_rejects_invalid_resource_settings(tmp_path: Path, flag: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        matrix.main(
+            ["unused.yaml", "--out", str(tmp_path), "--tasks-dir", str(tmp_path), flag, "0"]
+        )
+    assert exc.value.code == 2

@@ -78,3 +78,39 @@ Use `--keep-up` only for debugging individual failures; it intentionally leaves 
 running.
 
 See [Inspect results](results.md) for the report schema and interpretation.
+
+## Memory-aware matrix scheduling
+
+The matrix CLI admits new cases only when its soft memory budget and host headroom permit:
+
+```sh
+.venv/bin/python -m scopebench.matrix experiments/judge-size-medium.yaml \
+  --out experiments/judge-size-memory-aware \
+  --tasks-dir tasks/scopebench \
+  --concurrency 8 \
+  --memory-budget-mib 2048 \
+  --memory-overhead-mib 512 \
+  --task-default-memory-mib 384 \
+  --min-available-mib 2048
+```
+
+`--concurrency` is an upper bound, not a promise that eight cases run at once. The CLI defaults to
+one worker and a 2048 MiB admission budget, including a 512 MiB allowance for daemon/cache overhead.
+A task without observations initially reserves 384 MiB. The scheduler samples Docker working sets
+and learns observed per-task peaks with a 25% margin (minimum reservation 128 MiB). Use repeatable
+`--task-memory-mib task-slug=768` overrides for known heavier tasks; these are reservation floors.
+Other running Docker containers count against the budget. Reservations also count before a new
+stack appears in Docker statistics, preventing simultaneous starts from oversubscribing the budget.
+
+Low memory pauses new admissions; it does not kill, restart, or shrink an active case. On WSL,
+headroom is the smaller of Linux `MemAvailable` and Windows free physical memory, so other Windows
+applications can slow admissions too. If memory cannot be measured, no additional cases start and
+the error is surfaced. A queued case is not marked running and its inference timeout does not begin
+while it is waiting for admission. Arms remain sequential when running concurrent cases.
+
+This is **not a hard RAM cap**: active cases can grow between samples, Docker statistics exclude
+some costs, and the fixed overhead allowance is an estimate. Image builds can also peak above the
+budget. WSL/Docker VM hard limits must be managed separately. Task budgets and isolation remain
+unchanged. Scheduling conditions and observed task peaks are recorded in `ledger.json` under
+`scheduler_history`; this records resume sessions separately. The Python API leaves admission
+control disabled unless a `MemoryPolicy` is supplied to `run_matrix`.

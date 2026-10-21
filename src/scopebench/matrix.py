@@ -24,7 +24,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scopebench.evals import report_to_json, run_evals
 from scopebench.manifest import load_manifest
+from scopebench.memory import MemoryPolicy, MemorySample, sample_memory
 from scopebench.runner import RunOptions
 from scopebench.warmup import Endpoint, Probe, http_probe, served_name, warm_up
 from scopejudge.protocol import DenyFeedback
@@ -307,10 +308,12 @@ class Ledger:
     created: str
     runs: dict[str, RunRecord]
     path: Path
+    scheduler_history: list[dict[str, object]] = dataclasses.field(default_factory=list)
 
     def save(self) -> None:
         """Atomically write the ledger (temp file + os.replace), so a crash cannot truncate it."""
         payload = {
+            "scheduler_history": self.scheduler_history,
             "spec": self.spec,
             "code_revision": self.code_revision,
             "created": self.created,
@@ -347,6 +350,9 @@ class Ledger:
             raw_runs = cast("dict[str, object]", raw.get("runs", {}))
             runs = {rid: RunRecord.model_validate(rec) for rid, rec in raw_runs.items()}
             ledger = cls(stored_spec, stored_revision, cast("str", raw["created"]), runs, path)
+            ledger.scheduler_history = cast(
+                "list[dict[str, object]]", raw.get("scheduler_history", [])
+            )
         else:
             ledger = cls(spec.model_dump(mode="json"), revision, now, {}, path)
         # Add any planned units the ledger has not seen yet, as pending; never touch existing ones.
@@ -369,6 +375,8 @@ def run_matrix(
     revision: str | None = None,
     now: Callable[[], str] = _utcnow,
     concurrency: int = 1,
+    memory_policy: MemoryPolicy | None = None,
+    memory_probe: Callable[[dict[str, Path]], MemorySample] | None = None,
 ) -> Ledger:
     """Execute (or resume) the matrix, recording status in a crash-safe ledger.
 
@@ -390,8 +398,15 @@ def run_matrix(
     ledger = Ledger.load_or_init(
         out_dir, spec, units, revision=revision or code_revision(), now=now()
     )
+    session: dict[str, object] = {
+        "started": now(),
+        "concurrency": concurrency,
+        "memory_policy": dataclasses.asdict(memory_policy) if memory_policy is not None else None,
+    }
+    ledger.scheduler_history.append(session)
     ledger.save()
     lock = threading.Lock()
+    active_paths: dict[str, Path] = {}
 
     def process(run: ResolvedRun) -> None:
         with lock:
@@ -407,6 +422,7 @@ def run_matrix(
             record.status = "running"
             record.started = now()
             record.evidence_dir = str(attempt_dir)
+            active_paths[run.run_id] = attempt_dir
             record.ended = record.report = record.error = None
             record.cases = record.failures = record.expected = 0
             record.attempts.append(AttemptRecord.model_validate(record.model_dump()))
@@ -440,12 +456,65 @@ def run_matrix(
             record.attempts[-1] = AttemptRecord.model_validate(record.model_dump())
             ledger.save()
 
-    if concurrency <= 1:
+    def memory_batch(batch: list[ResolvedRun], policy: MemoryPolicy) -> None:
+        pending = [r for r in batch if ledger.runs[r.run_id].status != "completed"]
+        futures: dict[Future[None], ResolvedRun] = {}
+        probe_memory = memory_probe or sample_memory
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            while pending or futures:
+                for future in list(futures):
+                    if future.done():
+                        future.result()
+                        del futures[future]
+                if not pending and not futures:
+                    break
+                active = {r.run_id: r.task for r in futures.values()}
+                with lock:
+                    paths = {rid: active_paths[rid] for rid in active if rid in active_paths}
+                sample = probe_memory(paths)
+                policy.observe(sample, active)
+                for run in list(pending):
+                    if len(futures) >= concurrency:
+                        break
+                    if policy.allows(run.task, sample, active):
+                        futures[pool.submit(process, run)] = run
+                        active[run.run_id] = run.task
+                        pending.remove(run)
+                with lock:
+                    session["observed_task_peaks_mib"] = dict(policy.peaks)
+                    session["last_docker_mib"] = sample.total_mib
+                    session["last_available_mib"] = sample.available_mib
+                    waiting = bool(pending) and len(futures) < concurrency
+                    if waiting and not session.get("waiting_for_memory"):
+                        print(
+                            f"Waiting for memory: Docker {sample.total_mib:.0f} MiB, "
+                            + f"host available {sample.available_mib:.0f} MiB; "
+                            + f"admission budget {policy.budget_mib} MiB.",
+                            flush=True,
+                        )
+                    session["waiting_for_memory"] = waiting
+                    ledger.save()
+                # Avoid a busy loop even when no case fits. KeyboardInterrupt remains available.
+                _ = wait(list(futures), timeout=policy.poll_seconds, return_when=FIRST_COMPLETED)
+                if not futures:
+                    _ = threading.Event().wait(policy.poll_seconds)
+
+    if memory_policy is not None:
+        if concurrency <= 0:
+            raise ValueError("Concurrency must be positive.")
+        if concurrency == 1:
+            memory_batch(units, memory_policy)
+        else:
+            groups: dict[str, list[ResolvedRun]] = {}
+            for run in units:
+                groups.setdefault(run.arm, []).append(run)
+            for group in groups.values():
+                memory_batch(group, memory_policy)
+    elif concurrency <= 1:
         for run in units:
             process(run)
     else:
-        # Arm-major grouping keeps arms sequential (one warm judge at a time) while the arm's own
-        # units run concurrently -- independent of the planned ordering, which may interleave arms.
+        # Keep arms sequential while running their units concurrently.
         by_arm: dict[str, list[ResolvedRun]] = {}
         for run in units:
             by_arm.setdefault(run.arm, []).append(run)
@@ -453,6 +522,7 @@ def run_matrix(
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
                 for _ in pool.map(process, arm_units):
                     pass
+
     return ledger
 
 
@@ -517,6 +587,14 @@ def build_executor(
     return execute
 
 
+def task_memory_argument(value: str) -> tuple[str, int]:
+    """Parse a task=MiB startup reservation for the CLI."""
+    task, separator, amount = value.partition("=")
+    if not separator or not task or not amount.isdecimal() or int(amount) <= 0:
+        raise ValueError("Expected task-slug=positive-MiB.")
+    return task, int(amount)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI: resolve and run (or resume) a matrix spec, writing a ledger + per-unit reports."""
     import argparse  # noqa: PLC0415 - only the CLI entry needs argparse
@@ -535,7 +613,52 @@ def main(argv: list[str] | None = None) -> int:
         default=1,
         help="units run per arm at once (arms stay sequential; default 1 = serial)",
     )
+    _ = parser.add_argument(
+        "--memory-budget-mib",
+        type=int,
+        default=2048,
+        help="Soft Docker admission budget including overhead (default 2048).",
+    )
+    _ = parser.add_argument(
+        "--memory-overhead-mib",
+        type=int,
+        default=512,
+        help="Reserved daemon/cache overhead inside the budget.",
+    )
+    _ = parser.add_argument(
+        "--task-default-memory-mib",
+        type=int,
+        default=384,
+        help="Startup reservation for unprofiled tasks.",
+    )
+    _ = parser.add_argument(
+        "--task-memory-mib",
+        type=task_memory_argument,
+        action="append",
+        default=[],
+        help="Per-task reservation override: task-slug=MiB (repeatable).",
+    )
+    _ = parser.add_argument(
+        "--min-available-mib",
+        type=int,
+        default=1024,
+        help="Keep this much host memory free (Linux and Windows when using WSL).",
+    )
+    _ = parser.add_argument("--memory-poll-seconds", type=float, default=5.0)
     args = parser.parse_args(argv)
+    try:
+        memory_policy = MemoryPolicy(
+            budget_mib=cast("int", args.memory_budget_mib),
+            overhead_mib=cast("int", args.memory_overhead_mib),
+            default_task_mib=cast("int", args.task_default_memory_mib),
+            min_available_mib=cast("int", args.min_available_mib),
+            poll_seconds=cast("float", args.memory_poll_seconds),
+            task_mib=dict(cast("list[tuple[str, int]]", args.task_memory_mib)),
+        )
+        if cast("int", args.concurrency) <= 0:
+            parser.error("Concurrency must be positive.")
+    except ValueError as exc:
+        parser.error(str(exc))
     # Populate os.environ from ./.env (real env vars still win) so the actor/judge endpoint
     # credentials reach the run, matching the plain `scopebench` CLI. Without this a matrix run
     # launched from a bare shell would have no OPENAI_API_KEY/OPENAI_BASE_URL.
@@ -547,6 +670,7 @@ def main(argv: list[str] | None = None) -> int:
         out_dir,
         execute=build_executor(cast("Path", args.tasks_dir)),
         concurrency=cast("int", args.concurrency),
+        memory_policy=memory_policy,
     )
     done = sum(1 for record in ledger.runs.values() if record.status == "completed")
     errored = sum(1 for record in ledger.runs.values() if record.status == "error")
