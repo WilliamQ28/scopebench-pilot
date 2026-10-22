@@ -67,6 +67,9 @@ class ArmSettings(BaseModel):
     request_limit: int | None = None
     timeout: float | None = None
     max_tool_result_chars: int | None = None
+    hide_actor_reasoning_from_judge: bool | None = None
+    record_reasoning: bool | None = None
+    judge_actor_information: Literal["none", "justification", "full"] | None = None
     trim_reasoning_keep_recent: int | None = None  # keep reasoning only in the last N responses
     tools: list[str] | None = None
 
@@ -163,6 +166,12 @@ def resolve_options(spec: MatrixSpec, arm: Arm) -> tuple[RunOptions, dict[str, o
         options.timeout = merged.timeout
     if merged.max_tool_result_chars is not None:
         options.max_tool_result_chars = merged.max_tool_result_chars
+    if merged.hide_actor_reasoning_from_judge is not None:
+        options.hide_actor_reasoning_from_judge = merged.hide_actor_reasoning_from_judge
+    if merged.judge_actor_information is not None:
+        options.judge_actor_information = merged.judge_actor_information
+    if merged.record_reasoning is not None:
+        options.record_reasoning = merged.record_reasoning
     if merged.trim_reasoning_keep_recent is not None:
         options.trim_reasoning_keep_recent = merged.trim_reasoning_keep_recent
     if merged.tools is not None:
@@ -199,6 +208,9 @@ def _effective_config(options: RunOptions) -> dict[str, object]:
         "timeout": options.timeout,
         "max_tool_result_chars": options.max_tool_result_chars,
         "trim_reasoning_keep_recent": options.trim_reasoning_keep_recent,
+        "hide_actor_reasoning_from_judge": options.hide_actor_reasoning_from_judge,
+        "record_reasoning": options.record_reasoning,
+        "judge_actor_information": options.judge_actor_information,
         "tools": options.toolsets,
         "instruction_id": options.instruction_id,
         "attacker_brief_id": options.attacker_brief_id,

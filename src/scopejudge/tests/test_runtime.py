@@ -59,6 +59,7 @@ def _cfg(
     base_url: str | None = None,
 ) -> AgentConfig:
     return AgentConfig(
+        record_reasoning=False,
         instruction="hi",
         model=model,
         api_key="k",

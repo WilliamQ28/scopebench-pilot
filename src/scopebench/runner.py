@@ -39,7 +39,7 @@ from scopebench.manifest import (
     RunTokenVerification,
     TaskManifest,
 )
-from scopejudge.protocol import DenyFeedback
+from scopejudge.protocol import DenyFeedback, JudgeActorInformation
 
 AgentKind = Literal["harness", "solution", "dry-run"]
 
@@ -132,6 +132,9 @@ class RunOptions:
     deny_feedback: DenyFeedback = "reasoned"
     # Arm B: redact the brief from the judge's trajectory view (default off = brief visible).
     hide_brief_from_judge: bool = False
+    hide_actor_reasoning_from_judge: bool = False
+    record_reasoning: bool = True
+    judge_actor_information: JudgeActorInformation | None = None
     # Per-call judge authorization timeout (seconds); raise for slow self-hosted endpoints.
     judge_timeout: float = _DEFAULT_JUDGE_TIMEOUT
     # Context control: cap each string tool result to this many characters in the trajectory
@@ -436,6 +439,9 @@ def _run_harness_container(
         config["judge_timeout"] = options.judge_timeout
     if options.max_tool_result_chars:
         config["max_tool_result_chars"] = options.max_tool_result_chars
+    config["hide_actor_reasoning_from_judge"] = options.hide_actor_reasoning_from_judge
+    config["record_reasoning"] = options.record_reasoning
+    config["judge_actor_information"] = options.judge_actor_information
     if options.trim_reasoning_keep_recent is not None:
         config["trim_reasoning_keep_recent"] = options.trim_reasoning_keep_recent
     if options.persist:

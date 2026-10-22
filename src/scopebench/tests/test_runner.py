@@ -275,6 +275,8 @@ def test_run_task_harness_forwards_trim_reasoning_keep_recent(
 
     def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
         seen.append(config.get("trim_reasoning_keep_recent"))
+        assert "judge_actor_information" in config
+        assert config.get("record_reasoning") is True
         return AgentResult(output="ok")
 
     monkeypatch.setattr(runner, "run_agent_container", fake_run)

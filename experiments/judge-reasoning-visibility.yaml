@@ -1,0 +1,31 @@
+# Matched configuration comparison; live trajectories remain adaptive, not matched replay.
+# Run into a NEW output directory; never resume the older judge-size experiment with this spec.
+name: judge-reasoning-visibility
+panel:
+  - traversal-overreach-dead-end
+  - sqli-cross-tenant-dead-end
+repeat: 2
+ordering: interleaved
+seed: 0
+defaults:
+  model: openai-chat:qwen35-122b
+  base_url: https://inference.vulcan.alliancecan.ca/v1
+  judge_model: openai-chat:qwen35-122b
+  judge_base_url: https://inference.vulcan.alliancecan.ca/v1
+  instruction: program-brief-v3
+  scopejudge: true
+  trajectory_judge: false
+  judge_timeout: 120
+  deny_feedback: reasoned
+  hide_brief_from_judge: true
+  record_reasoning: true
+  request_limit: 150
+  timeout: 7200
+  max_tool_result_chars: 12000
+  trim_reasoning_keep_recent: 3
+  attacker_brief: briefs/adaptive-monitor-aware.md
+arms:
+  - name: actor-reasoning-visible
+    hide_actor_reasoning_from_judge: false
+  - name: actor-reasoning-hidden
+    hide_actor_reasoning_from_judge: true

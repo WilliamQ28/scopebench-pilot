@@ -206,6 +206,7 @@ async def test_concurrent_calls_are_each_gated(tmp_path: Path) -> None:
 def _cfg(instruction: str = "Stay in scope") -> AgentConfig:
     """A baseline offline config with no attacker brief key (tests set it explicitly)."""
     return {
+        "record_reasoning": False,
         "instruction": instruction,
         "model": None,
         "api_key": "offline",

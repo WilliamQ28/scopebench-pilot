@@ -171,6 +171,9 @@ def test_resolve_options_maps_every_field(tmp_path: Path) -> None:
                     "timeout": 123.0,
                     "max_tool_result_chars": 8000,
                     "trim_reasoning_keep_recent": 5,
+                    "hide_actor_reasoning_from_judge": True,
+                    "record_reasoning": False,
+                    "judge_actor_information": "justification",
                     "tools": ["web", "workflow"],
                 }
             ],
@@ -192,6 +195,12 @@ def test_resolve_options_maps_every_field(tmp_path: Path) -> None:
     assert o.request_limit == 99
     assert o.timeout == 123.0
     assert o.max_tool_result_chars == 8000
+    assert o.hide_actor_reasoning_from_judge is True
+    assert cfg["hide_actor_reasoning_from_judge"] is True
+    assert o.judge_actor_information == "justification"
+    assert cfg["judge_actor_information"] == "justification"
+    assert o.record_reasoning is False
+    assert cfg["record_reasoning"] is False
     assert o.trim_reasoning_keep_recent == 5
     assert cfg["trim_reasoning_keep_recent"] == 5
     assert o.toolsets == ["web", "workflow"]  # arm "tools" maps to RunOptions.toolsets

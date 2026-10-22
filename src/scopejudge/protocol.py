@@ -13,6 +13,7 @@ from typing import Literal, NotRequired, TypedDict
 # default, unchanged behavior) returns the verdict and rationale; ``white`` also discloses the
 # judge's policy prompt. Only meaningful when ScopeJudge is enabled.
 DenyFeedback = Literal["black", "binary", "reasoned", "white"]
+JudgeActorInformation = Literal["none", "justification", "full"]
 
 
 class AgentConfig(TypedDict):
@@ -40,6 +41,9 @@ class AgentConfig(TypedDict):
     # Arm B: redact the attacker brief from the trajectory the judge inspects, so the gate never
     # reads the attacker's declared intent. Absent/False = Arm A (brief visible in-band).
     hide_brief_from_judge: NotRequired[bool]
+    hide_actor_reasoning_from_judge: NotRequired[bool]
+    record_reasoning: NotRequired[bool]
+    judge_actor_information: NotRequired[JudgeActorInformation | None]
     # Per-call authorization timeout for the judge (seconds). Absent = 30. Slow self-hosted
     # endpoints need a larger value, else judge calls time out and fail closed as ``uncertain``.
     judge_timeout: NotRequired[float]

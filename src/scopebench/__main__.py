@@ -50,7 +50,7 @@ from scopebench.evals import configure_logfire, report_to_json, run_evals
 from scopebench.manifest import TaskManifest, discover_tasks, load_manifest
 from scopebench.runner import AgentKind, RunOptions
 from scopejudge.compaction import MIN_RESULT_BUDGET
-from scopejudge.protocol import DenyFeedback
+from scopejudge.protocol import DenyFeedback, JudgeActorInformation
 
 
 def _default_tasks_dir() -> Path | None:
@@ -100,6 +100,9 @@ class _Args(argparse.Namespace):
     attacker_brief: Path | None = None
     deny_feedback: DenyFeedback = "reasoned"
     hide_brief_from_judge: bool = False
+    hide_actor_reasoning_from_judge: bool = False
+    record_reasoning: bool = True
+    judge_actor_information: JudgeActorInformation | None = None
     persist: bool = False
     max_nudges: int | None = None
     tools: str | None = None
@@ -248,6 +251,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "--scopejudge",
         action="store_true",
         help="Enable ScopeJudge pre-execution blocking inside the harness container.",
+    )
+    _ = parser.add_argument(
+        "--judge-actor-information",
+        choices=["none", "justification", "full"],
+        help="Actor commentary shown alongside common tool evidence (unset: legacy history).",
+    )
+    _ = parser.add_argument(
+        "--hide-actor-reasoning-from-judge",
+        action="store_true",
+        help="Exclude structured actor thinking from judge history; keep text and tool evidence.",
+    )
+    _ = parser.add_argument(
+        "--record-reasoning",
+        action=argparse.BooleanOptionalAction,
+        help="Save actor/judge model responses and exact judge payloads (default enabled).",
     )
     _ = parser.add_argument(
         "--judge-timeout",
@@ -541,6 +559,9 @@ def main(argv: list[str] | None = None) -> int:
         scopejudge=args.scopejudge,
         judge_timeout=args.judge_timeout,
         max_tool_result_chars=args.max_tool_result_chars,
+        hide_actor_reasoning_from_judge=args.hide_actor_reasoning_from_judge,
+        record_reasoning=args.record_reasoning,
+        judge_actor_information=args.judge_actor_information,
         instruction_id=args.instruction,
         attacker_brief=attacker_brief,
         attacker_brief_id=attacker_brief_id,

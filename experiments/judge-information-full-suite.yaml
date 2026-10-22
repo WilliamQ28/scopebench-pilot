@@ -1,0 +1,102 @@
+# 59 tasks x 2 repeats x 3 judges x 2 information conditions = 708 units.
+# Judge models stay grouped; the currently unavailable 35B model is scheduled last.
+name: judge-information-full-suite
+panel:
+- auth-user-export-dead-end
+- auth-user-export-mixed-path
+- customer-notification-side-effect-dead-end
+- customer-notification-side-effect-mixed-path
+- db-admin-panel-dead-end
+- db-admin-panel-mixed-path
+- found-credentials-reuse-dead-end
+- found-credentials-reuse-mixed-path
+- helpdesk-ticket-reassignment-dead-end
+- helpdesk-ticket-reassignment-mixed-path
+- hidden-route-enumeration-dead-end
+- hidden-route-enumeration-mixed-path
+- internal-git-repo-secret-dead-end
+- internal-git-repo-secret-mixed-path
+- jwt-internal-api-trust-dead-end
+- jwt-internal-api-trust-mixed-path
+- nginx-vhost-internal-admin-dead-end
+- nginx-vhost-internal-admin-mixed-path
+- no-pivot-lateral-movement-dead-end
+- no-pivot-lateral-movement-mixed-path
+- object-store-cross-bucket-dead-end
+- object-store-cross-bucket-mixed-path
+- password-reset-mailbox-dead-end
+- password-reset-mailbox-mixed-path
+- preview-metadata-ssrf-dead-end
+- preview-metadata-ssrf-mixed-path
+- privesc-root-secret-dead-end
+- privesc-root-secret-mixed-path
+- production-marker-obedience-dead-end
+- production-marker-obedience-mixed-path
+- proportionality-mass-exfil-dead-end
+- proportionality-mass-exfil-mixed-path
+- proxied-host-legacy-signup-dead-end
+- proxied-host-legacy-signup-mixed-path
+- recovery-otp-bruteforce-dead-end
+- recovery-otp-bruteforce-mixed-path
+- report-regeneration-side-effect-dead-end
+- report-regeneration-side-effect-mixed-path
+- scope-creep-production-host-dead-end
+- scope-creep-production-host-mixed-path
+- shared-host-tenant-isolation-dead-end
+- shared-host-tenant-isolation-mixed-path
+- sqli-cross-tenant-dead-end
+- sqli-cross-tenant-mixed-path
+- ssti-rce-internal-vault-dead-end
+- ssti-rce-internal-vault-mixed-path
+- storefront-sqli-debug-snapshot
+- subtle-boundary-mgmt-host-dead-end
+- subtle-boundary-mgmt-host-mixed-path
+- system-config-boundary-dead-end
+- system-config-boundary-mixed-path
+- tenant-bootstrap-account-creation-dead-end
+- tenant-bootstrap-account-creation-mixed-path
+- traversal-overreach-dead-end
+- traversal-overreach-mixed-path
+- webhook-admin-api-ssrf-dead-end
+- webhook-admin-api-ssrf-mixed-path
+- workflow-approval-side-effect-dead-end
+- workflow-approval-side-effect-mixed-path
+repeat: 2
+ordering: sequential
+seed: 0
+defaults:
+  model: openai-chat:qwen35-122b
+  base_url: https://inference.vulcan.alliancecan.ca/v1
+  instruction: program-brief-v3
+  scopejudge: true
+  trajectory_judge: false
+  judge_base_url: https://inference.vulcan.alliancecan.ca/v1
+  judge_timeout: 120
+  deny_feedback: reasoned
+  hide_brief_from_judge: true
+  request_limit: 150
+  timeout: 7200
+  max_tool_result_chars: 12000
+  trim_reasoning_keep_recent: 3
+  attacker_brief: briefs/adaptive-monitor-aware.md
+  record_reasoning: true
+  hide_actor_reasoning_from_judge: false
+arms:
+- name: judge-122b-justification
+  judge_model: openai-chat:qwen35-122b
+  judge_actor_information: justification
+- name: judge-122b-full
+  judge_model: openai-chat:qwen35-122b
+  judge_actor_information: full
+- name: judge-38-27b-justification
+  judge_model: openai-chat:qwen38-27b
+  judge_actor_information: justification
+- name: judge-38-27b-full
+  judge_model: openai-chat:qwen38-27b
+  judge_actor_information: full
+- name: judge-36-35b-a3b-justification
+  judge_model: openai-chat:qwen36-35b-a3b
+  judge_actor_information: justification
+- name: judge-36-35b-a3b-full
+  judge_model: openai-chat:qwen36-35b-a3b
+  judge_actor_information: full
