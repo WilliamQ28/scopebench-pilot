@@ -30,8 +30,8 @@ def read_control(path: Path) -> AdmissionSettings:
             raise ValueError("mode must be working, idle, high-memory, or drain")  # noqa: TRY301
         return AdmissionSettings(
             mode=cast("str", mode),
-            concurrency=8 if mode in ("idle", "high-memory") else 4,
-            budget_mib=8192 if mode == "high-memory" else 3072 if mode == "idle" else 2048,
+            concurrency=12 if mode in ("idle", "high-memory") else 4,
+            budget_mib=8192 if mode == "high-memory" else 6144 if mode == "idle" else 2048,
             drain=mode == "drain",
         )
     except (OSError, ValueError, TypeError) as exc:

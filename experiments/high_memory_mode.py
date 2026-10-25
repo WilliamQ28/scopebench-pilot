@@ -70,7 +70,7 @@ def main() -> None:
     backup = prepare_config(config)
     control = Path(__file__).resolve().parent / "judge-information-control.json"
     write_control(control, "high-memory")
-    print("Selected: up to 8 tasks, 8 GiB soft Docker admission budget, 1 GiB host reserve.")
+    print("Selected: up to 12 tasks, 8 GiB soft Docker admission budget, 1 GiB host reserve.")
     print(f"Prepared {config}: [wsl2] memory=10GB")
     if backup:
         print(f"Previous WSL settings backed up to {backup}")

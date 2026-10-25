@@ -78,7 +78,7 @@ The suite launcher polls `experiments/judge-information-control.json` on every a
 | Mode | Maximum task slots | Soft Docker budget | Minimum host memory reserve |
 | --- | ---: | ---: | ---: |
 | working | 4 | 2048 MiB | 1024 MiB |
-| idle | 8 | 3072 MiB | 1024 MiB |
+| idle | 12 | 6144 MiB | 1024 MiB |
 | drain | No new admissions; finish current tasks | 2048 MiB | 1024 MiB |
 
 Switch at any time from the repository root:
@@ -98,10 +98,17 @@ Eight slots do not guarantee twice the throughput: shared remote inference, host
 
 ### High-memory profile
 
-[ScopeBench High Memory.bat](../../experiments/ScopeBench%20High%20Memory.bat) selects `high-memory`: up to eight task slots with an **8192 MiB soft Docker admission budget**. The 1024 MiB host reserve remains in force. This changes admission headroom, not the experimental treatment and not a preallocation of physical RAM. Working/Idle switches still return to their previous profiles.
+[ScopeBench High Memory.bat](../../experiments/ScopeBench%20High%20Memory.bat) selects `high-memory`: up to twelve task slots with an **8192 MiB soft Docker admission budget**. The 1024 MiB host reserve remains in force. This changes admission headroom, not the experimental treatment and not a preallocation of physical RAM. Working/Idle switches still return to their previous profiles.
 
 When clicked, the launcher also prepares `%USERPROFILE%\.wslconfig` with `[wsl2] memory=10GB`, preserving unrelated settings and making a timestamped backup of an existing file before changing it. This is a global ceiling for WSL2 distributions, not an exclusive Docker memory reservation. The current VM's ceiling does not change until WSL restarts. The launcher deliberately performs no WSL shutdown, stops no Windows applications, and does not start a competing matrix process.
 
 To apply the WSL ceiling without interrupting tasks: select `drain`, wait until all scheduler processes exit and no task stacks are active, then restart WSL/Docker from Windows and resume the suite once. Never run `wsl --shutdown` while this run has active tasks; it would stop the VM and can lose buffered judge reasoning. A new shell can resume with `.venv/bin/python -u experiments/run_information_suite.py` from the repository root after verifying no competing scheduler exists.
 
-Eight tasks currently need much less than 8 GiB in many fixtures; the larger budget alone does not raise the worker limit above eight or guarantee more inference throughput. Use this profile when Windows has sufficient free RAM. The Windows VM ceiling persists across Working/Idle mode changes; those buttons only lower admission, and a VM ceiling is not automatically consumed memory.
+Eight tasks currently need much less than 8 GiB in many fixtures; the larger budget alone does not raise the worker limit above twelve or guarantee more inference throughput. Use this profile when Windows has sufficient free RAM. The Windows VM ceiling persists across Working/Idle mode changes; those buttons only lower admission, and a VM ceiling is not automatically consumed memory.
+
+
+### Expanded Idle profile (25 October update)
+
+The existing Idle button now requests **12 concurrent task slots and a 6144 MiB soft Docker budget**. Working remains four slots and 2048 MiB; High Memory requests twelve slots and 8192 MiB. All retain the 1024 MiB host reserve and sequential judge-arm ordering. These are admission maxima, not promises to occupy that many slots. Idle does not edit `.wslconfig` and needs no WSL or Windows restart. The scheduler process needs a one-time graceful reload to enlarge its thread pool; existing units finish and retain logs before the replacement starts. Later Working/Idle switches take effect on polling without restarts.
+
+The launcher accepts repeated `--after-pid` arguments to wait for both an active scheduler and a superseded waiting replacement during handover. This prevents concurrent ledger owners. Do not send a second interrupt to a scheduler already draining its worker pool; retire only the superseded replacement and wait for all predecessor processes. More concurrency may increase endpoint latency and timeout incidence; annotate this operational change in analysis instead of attributing a throughput or outcome change solely to judge reasoning visibility.

@@ -28,11 +28,10 @@ from scopebench.warmup import WarmupTimeoutError
 def main() -> int:
     """Run/resume all units, retaining readiness failures as retryable ledger errors."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--after-pid", type=int)
+    parser.add_argument("--after-pid", type=int, action="append", default=[])
     parser.add_argument("--retry-errors", action="store_true")
     args = parser.parse_args()
-    if args.after_pid is not None:
-        pid = cast("int", args.after_pid)
+    for pid in cast("list[int]", args.after_pid):
         process = Path(f"/proc/{pid}/stat")
         try:
             identity = process.read_text().split()[21]
@@ -110,7 +109,7 @@ def main() -> int:
         out,
         revision=revision,
         execute=guarded,
-        concurrency=8,
+        concurrency=12,
         live_control=lambda: read_control(control_path),
         retry_errors=cast("bool", args.retry_errors),
         memory_policy=MemoryPolicy(

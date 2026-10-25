@@ -893,13 +893,14 @@ def test_resume_can_leave_old_errors_for_later_retry(tmp_path: Path) -> None:
     assert len(ledger.runs["a__t__r1"].attempts) == 1
 
 
-def test_live_slots_can_reach_eight_then_reduce_without_killing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("slots", [8, 12])
+def test_live_slots_can_grow_then_reduce_without_killing(tmp_path: Path, slots: int) -> None:
     started = 0
     peak = 0
     active = 0
     polls = 0
     lock = threading.Lock()
-    all_eight = threading.Event()
+    all_started = threading.Event()
     release = threading.Event()
 
     def execute(_run: ResolvedRun, _out: Path) -> ExecResult:
@@ -908,8 +909,8 @@ def test_live_slots_can_reach_eight_then_reduce_without_killing(tmp_path: Path) 
             started += 1
             active += 1
             peak = max(peak, active)
-            if started == 8:
-                all_eight.set()
+            if started == slots:
+                all_started.set()
         assert release.wait(5)
         with lock:
             active -= 1
@@ -919,21 +920,21 @@ def test_live_slots_can_reach_eight_then_reduce_without_killing(tmp_path: Path) 
         nonlocal polls
         polls += 1
         if polls == 1:
-            return AdmissionSettings(mode="idle", concurrency=8, budget_mib=3072)
-        assert all_eight.wait(5)
+            return AdmissionSettings(mode="idle", concurrency=slots, budget_mib=6144)
+        assert all_started.wait(5)
         release.set()
         return AdmissionSettings()
 
     ledger = run_matrix(
-        _spec(panel=["t"], arms=[Arm(name="a")], repeat=10),
+        _spec(panel=["t"], arms=[Arm(name="a")], repeat=slots + 2),
         tmp_path,
         execute=execute,
         revision="r",
-        concurrency=8,
+        concurrency=slots,
         memory_policy=MemoryPolicy(default_task_mib=128, poll_seconds=0.001),
         memory_probe=lambda _p: MemorySample(0, 8192),
         live_control=control,
     )
-    assert peak == 8
-    assert started == 10
+    assert peak == slots
+    assert started == slots + 2
     assert all(r.status == "completed" for r in ledger.runs.values())
