@@ -8,7 +8,8 @@ from scopebench.admission import AdmissionSettings, RunMode, read_control, write
 
 
 @pytest.mark.parametrize(
-    ("mode", "slots", "budget"), [("working", 4, 2048), ("idle", 8, 3072), ("drain", 4, 2048)]
+    ("mode", "slots", "budget"),
+    [("working", 4, 2048), ("idle", 8, 3072), ("high-memory", 8, 8192), ("drain", 4, 2048)],
 )
 def test_profiles(tmp_path: Path, mode: RunMode, slots: int, budget: int) -> None:
     path = tmp_path / "control.json"

@@ -95,3 +95,13 @@ The launcher now prioritizes the remaining first pass and leaves prior error uni
 Scheduler sessions record the new scheduler revision and control-change history, while preserving the original evaluation revision. Before sharing that evaluation revision, the operational launcher verifies that evaluator/runtime/task/brief/dependency code has not changed relative to it; only matrix/admission scheduling and test/operational files are excluded. This does not permit arbitrary evaluation-code changes during a resume.
 
 Eight slots do not guarantee twice the throughput: shared remote inference, host memory, and task timeouts can still dominate. The October 29 target requires a measured throughput increase and is not guaranteed by selecting idle mode. Earlier failed units require additional retry time beyond first-pass completion.
+
+### High-memory profile
+
+[ScopeBench High Memory.bat](../../experiments/ScopeBench%20High%20Memory.bat) selects `high-memory`: up to eight task slots with an **8192 MiB soft Docker admission budget**. The 1024 MiB host reserve remains in force. This changes admission headroom, not the experimental treatment and not a preallocation of physical RAM. Working/Idle switches still return to their previous profiles.
+
+When clicked, the launcher also prepares `%USERPROFILE%\.wslconfig` with `[wsl2] memory=10GB`, preserving unrelated settings and making a timestamped backup of an existing file before changing it. This is a global ceiling for WSL2 distributions, not an exclusive Docker memory reservation. The current VM's ceiling does not change until WSL restarts. The launcher deliberately performs no WSL shutdown, stops no Windows applications, and does not start a competing matrix process.
+
+To apply the WSL ceiling without interrupting tasks: select `drain`, wait until all scheduler processes exit and no task stacks are active, then restart WSL/Docker from Windows and resume the suite once. Never run `wsl --shutdown` while this run has active tasks; it would stop the VM and can lose buffered judge reasoning. A new shell can resume with `.venv/bin/python -u experiments/run_information_suite.py` from the repository root after verifying no competing scheduler exists.
+
+Eight tasks currently need much less than 8 GiB in many fixtures; the larger budget alone does not raise the worker limit above eight or guarantee more inference throughput. Use this profile when Windows has sufficient free RAM. The Windows VM ceiling persists across Working/Idle mode changes; those buttons only lower admission, and a VM ceiling is not automatically consumed memory.
