@@ -16,6 +16,7 @@ from typing import ClassVar, cast
 import pytest
 
 from scopebench import matrix
+from scopebench.admission import AdmissionSettings
 from scopebench.matrix import (
     Arm,
     ExecResult,
@@ -829,3 +830,110 @@ def test_cli_rejects_invalid_resource_settings(tmp_path: Path, flag: str) -> Non
             ["unused.yaml", "--out", str(tmp_path), "--tasks-dir", str(tmp_path), flag, "0"]
         )
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("concurrency", [1, 8])
+def test_live_control_drain_leaves_pending_units(tmp_path: Path, concurrency: int) -> None:
+    spec = _spec(panel=["t"], arms=[Arm(name="a"), Arm(name="b")], repeat=1)
+    ledger = run_matrix(
+        spec,
+        tmp_path,
+        execute=lambda _r, _o: ExecResult(cases=1, expected=1),
+        revision="r",
+        concurrency=concurrency,
+        memory_policy=MemoryPolicy(poll_seconds=0.001),
+        memory_probe=lambda _p: MemorySample(0, 8192),
+        live_control=lambda: AdmissionSettings(mode="drain", drain=True),
+    )
+    assert all(r.status == "pending" for r in ledger.runs.values())
+
+
+def test_live_control_reload_grows_slots_and_pauses_bad_config(tmp_path: Path) -> None:
+    polls = 0
+    seen: list[str] = []
+
+    def control() -> AdmissionSettings:
+        nonlocal polls
+        polls += 1
+        if polls == 1:
+            return AdmissionSettings(mode="invalid", concurrency=0, error="bad JSON")
+        return AdmissionSettings(mode="idle", concurrency=8, budget_mib=3072)
+
+    def execute(run: ResolvedRun, _out: Path) -> ExecResult:
+        assert polls >= 2
+        seen.append(run.run_id)
+        return ExecResult(cases=1, expected=1)
+
+    ledger = run_matrix(
+        _spec(panel=["t"], arms=[Arm(name="a")], repeat=2),
+        tmp_path,
+        execute=execute,
+        revision="r",
+        concurrency=8,
+        memory_policy=MemoryPolicy(poll_seconds=0.001),
+        memory_probe=lambda _p: MemorySample(0, 8192),
+        live_control=control,
+    )
+    assert len(seen) == 2
+    assert len(cast("list[object]", ledger.scheduler_history[-1]["control_changes"])) == 2
+    assert all(r.status == "completed" for r in ledger.runs.values())
+
+
+def test_resume_can_leave_old_errors_for_later_retry(tmp_path: Path) -> None:
+    spec = _spec(panel=["t"], arms=[Arm(name="a")], repeat=1)
+    ledger = run_matrix(spec, tmp_path, execute=lambda _r, _o: ExecResult(), revision="r")
+    assert ledger.runs["a__t__r1"].status == "error"
+    ledger = run_matrix(
+        spec,
+        tmp_path,
+        execute=lambda _r, _o: pytest.fail("Old error retried"),
+        revision="r",
+        retry_errors=False,
+    )
+    assert len(ledger.runs["a__t__r1"].attempts) == 1
+
+
+def test_live_slots_can_reach_eight_then_reduce_without_killing(tmp_path: Path) -> None:
+    started = 0
+    peak = 0
+    active = 0
+    polls = 0
+    lock = threading.Lock()
+    all_eight = threading.Event()
+    release = threading.Event()
+
+    def execute(_run: ResolvedRun, _out: Path) -> ExecResult:
+        nonlocal started, peak, active
+        with lock:
+            started += 1
+            active += 1
+            peak = max(peak, active)
+            if started == 8:
+                all_eight.set()
+        assert release.wait(5)
+        with lock:
+            active -= 1
+        return ExecResult(cases=1, expected=1)
+
+    def control() -> AdmissionSettings:
+        nonlocal polls
+        polls += 1
+        if polls == 1:
+            return AdmissionSettings(mode="idle", concurrency=8, budget_mib=3072)
+        assert all_eight.wait(5)
+        release.set()
+        return AdmissionSettings()
+
+    ledger = run_matrix(
+        _spec(panel=["t"], arms=[Arm(name="a")], repeat=10),
+        tmp_path,
+        execute=execute,
+        revision="r",
+        concurrency=8,
+        memory_policy=MemoryPolicy(default_task_mib=128, poll_seconds=0.001),
+        memory_probe=lambda _p: MemorySample(0, 8192),
+        live_control=control,
+    )
+    assert peak == 8
+    assert started == 10
+    assert all(r.status == "completed" for r in ledger.runs.values())

@@ -34,6 +34,7 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from scopebench.admission import AdmissionSettings
 from scopebench.evals import report_to_json, run_evals
 from scopebench.manifest import load_manifest
 from scopebench.memory import MemoryPolicy, MemorySample, sample_memory
@@ -389,6 +390,8 @@ def run_matrix(
     concurrency: int = 1,
     memory_policy: MemoryPolicy | None = None,
     memory_probe: Callable[[dict[str, Path]], MemorySample] | None = None,
+    live_control: Callable[[], AdmissionSettings] | None = None,
+    retry_errors: bool = True,
 ) -> Ledger:
     """Execute (or resume) the matrix, recording status in a crash-safe ledger.
 
@@ -413,10 +416,14 @@ def run_matrix(
     session: dict[str, object] = {
         "started": now(),
         "concurrency": concurrency,
+        "scheduler_revision": code_revision(),
+        "retry_errors": retry_errors,
         "memory_policy": dataclasses.asdict(memory_policy) if memory_policy is not None else None,
     }
     ledger.scheduler_history.append(session)
     ledger.save()
+    units = [r for r in units if retry_errors or ledger.runs[r.run_id].status != "error"]
+    stop_requested = False
     lock = threading.Lock()
     active_paths: dict[str, Path] = {}
 
@@ -469,6 +476,7 @@ def run_matrix(
             ledger.save()
 
     def memory_batch(batch: list[ResolvedRun], policy: MemoryPolicy) -> None:
+        nonlocal stop_requested
         pending = [r for r in batch if ledger.runs[r.run_id].status != "completed"]
         futures: dict[Future[None], ResolvedRun] = {}
         probe_memory = memory_probe or sample_memory
@@ -480,13 +488,32 @@ def run_matrix(
                         del futures[future]
                 if not pending and not futures:
                     break
+                slots = concurrency
+                if live_control is not None:
+                    settings = live_control()
+                    slots = min(concurrency, settings.concurrency)
+                    policy.budget_mib = settings.budget_mib
+                    stop_requested = settings.drain
+                    if stop_requested:
+                        slots = 0
+                    control = dataclasses.asdict(settings)
+                    with lock:
+                        if session.get("live_control") != control:
+                            session["live_control"] = control
+                            history = cast(
+                                "list[dict[str, object]]", session.setdefault("control_changes", [])
+                            )
+                            history.append({"at": now(), **control})
+                            ledger.save()
+                    if stop_requested and not futures:
+                        break
                 active = {r.run_id: r.task for r in futures.values()}
                 with lock:
                     paths = {rid: active_paths[rid] for rid in active if rid in active_paths}
                 sample = probe_memory(paths)
                 policy.observe(sample, active)
                 for run in list(pending):
-                    if len(futures) >= concurrency:
+                    if len(futures) >= slots:
                         break
                     if policy.allows(run.task, sample, active):
                         futures[pool.submit(process, run)] = run
@@ -496,7 +523,7 @@ def run_matrix(
                     session["observed_task_peaks_mib"] = dict(policy.peaks)
                     session["last_docker_mib"] = sample.total_mib
                     session["last_available_mib"] = sample.available_mib
-                    waiting = bool(pending) and len(futures) < concurrency
+                    waiting = bool(pending) and len(futures) < slots
                     if waiting and not session.get("waiting_for_memory"):
                         print(
                             f"Waiting for memory: Docker {sample.total_mib:.0f} MiB, "
@@ -522,6 +549,8 @@ def run_matrix(
                 groups.setdefault(run.arm, []).append(run)
             for group in groups.values():
                 memory_batch(group, memory_policy)
+                if stop_requested:
+                    break
     elif concurrency <= 1:
         for run in units:
             process(run)

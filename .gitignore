@@ -47,3 +47,6 @@ experiments/*/
 
 # macOS metadata
 .DS_Store
+
+# Live local scheduler mode (operator state, not experimental treatment).
+/experiments/judge-information-control.json

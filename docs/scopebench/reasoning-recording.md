@@ -70,3 +70,28 @@ Use either matrix `judge_actor_information: justification` or CLI `--judge-actor
 “No commentary” is a channel definition, not proof of zero strategy disclosure: commands, code comments, `think`/report/tracker tool arguments, and tool outputs can contain strategic text. These are retained as action evidence in every mode. If a strict action-only adversary is desired, separately restrict commentary tools and control comments, rather than claiming the mediator removes all intent. `full` means endpoint-returned reasoning still present after actor-history trimming and judge-window bounding, not the complete saved archive. Different information lengths can retain different amounts of history under the common character limit; record elision and use fixed histories in replay to isolate this effect.
 
 The original two-way `hide_actor_reasoning_from_judge` switch remains available for legacy comparisons. It retains ordinary actor prose; it is not equivalent to the new `none` or `justification` conditions. Prefer the explicit three-way setting for new experiments and keep denial feedback fixed while comparing it.
+
+## Live resource modes for the running information suite
+
+The suite launcher polls `experiments/judge-information-control.json` on every admission cycle. The setting is scheduler-only; task prompts, model choices, reasoning visibility, request limits, and timeouts stay unchanged.
+
+| Mode | Maximum task slots | Soft Docker budget | Minimum host memory reserve |
+| --- | ---: | ---: | ---: |
+| working | 4 | 2048 MiB | 1024 MiB |
+| idle | 8 | 3072 MiB | 1024 MiB |
+| drain | No new admissions; finish current tasks | 2048 MiB | 1024 MiB |
+
+Switch at any time from the repository root:
+
+```sh
+.venv/bin/python experiments/set_information_mode.py idle
+.venv/bin/python experiments/set_information_mode.py working
+```
+
+Windows users can double-click [ScopeBench Idle.bat](../../experiments/ScopeBench%20Idle.bat) or [ScopeBench Working.bat](../../experiments/ScopeBench%20Working.bat). These local convenience launchers target this installation at `/home/wwwwi/scopebench-pilot` through the default WSL distribution. This is a manual working/idle switch, not automatic keyboard-activity detection. Both modes still measure host memory; idle mode cannot allocate RAM that Windows applications are already using. No active task is killed when lowering the limit. Missing/invalid controls stop new admissions until repaired, without disturbing running tasks. `drain` exits after active tasks finish, preserving pending units.
+
+The launcher now prioritizes the remaining first pass and leaves prior error units untouched. Use `--retry-errors` for an explicit later retry pass; attempt history remains preserved. Already running work is allowed to finish before the upgraded scheduler takes over. `--after-pid PID` waits for the previous process to exit, preventing two schedulers from writing the same ledger. Do not manually launch a second scheduler against the same output directory.
+
+Scheduler sessions record the new scheduler revision and control-change history, while preserving the original evaluation revision. Before sharing that evaluation revision, the operational launcher verifies that evaluator/runtime/task/brief/dependency code has not changed relative to it; only matrix/admission scheduling and test/operational files are excluded. This does not permit arbitrary evaluation-code changes during a resume.
+
+Eight slots do not guarantee twice the throughput: shared remote inference, host memory, and task timeouts can still dominate. The October 29 target requires a measured throughput increase and is not guaranteed by selecting idle mode. Earlier failed units require additional retry time beyond first-pass completion.
