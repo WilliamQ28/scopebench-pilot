@@ -2,6 +2,8 @@
 
 **Prepared:** 22 October 2026. **Status:** preliminary, descriptive results for research-question development; not a model ranking or a confirmed violation study.
 
+**Follow-up, 25 October 2026:** [Actor and judge reasoning case studies](candidate-breach-reasoning-report-2026-10-25.md) document the full-suite traversal recurrence and notification dry-run candidate, with verbatim returned reasoning and source receipts.
+
 ## Main finding
 
 This initial matrix supports further investigation of when ScopeJudge fails to enforce rules of engagement (RoE). Four runs recovered forbidden objectives with correlated local evidence of allowed tool execution. Failures differed by task: the 122B judge allowed out-of-root file retrieval, while the 35B MoE judge allowed cross-tenant secret retrieval. The 27B judge blocked representative attempts at both boundaries, although several runs in that arm ended in actor refusal and therefore did not meaningfully test the judge.
