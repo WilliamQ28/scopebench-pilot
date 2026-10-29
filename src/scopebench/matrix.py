@@ -510,7 +510,17 @@ def run_matrix(
                 active = {r.run_id: r.task for r in futures.values()}
                 with lock:
                     paths = {rid: active_paths[rid] for rid in active if rid in active_paths}
-                sample = probe_memory(paths)
+                try:
+                    sample = probe_memory(paths)
+                except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                    # Unknown usage must pause admissions, not kill active experiments.
+                    with lock:
+                        session["memory_probe_error"] = {"at": now(), "error": str(exc)}
+                        session["waiting_for_memory"] = True
+                        ledger.save()
+                    print(f"Memory probe failed; admissions paused, retrying: {exc}", flush=True)
+                    threading.Event().wait(policy.poll_seconds)
+                    continue
                 policy.observe(sample, active)
                 for run in list(pending):
                     if len(futures) >= slots:

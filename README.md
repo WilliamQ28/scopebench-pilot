@@ -14,6 +14,10 @@ The original pilot's 2,160 ATIF trajectories are published as the
 [`dreadnode/scopebench-pilot`](https://huggingface.co/datasets/dreadnode/scopebench-pilot)
 dataset on Hugging Face.
 
+For the active research run, start with the [experiment state and researcher onboarding report](EXPERIMENT_STATE.md). It covers progress, evidence limits, operating procedures, and next work.
+
+Check the active run without changing it: `.venv/bin/python check_run.py` (or double-click `Check Run.bat` on Windows). Add `--watch 60` for periodic updates.
+
 ## What is included
 
 - 59 containerized task manifests, including mixed-path extensions, under [`tasks/scopebench`](tasks/scopebench)

@@ -795,6 +795,41 @@ def test_memory_reservations_prevent_simultaneous_startup_oversubscription(tmp_p
     assert policy.peaks
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.CalledProcessError(1, "powershell"),
+        subprocess.TimeoutExpired("powershell", 15),
+        OSError("probe unavailable"),
+        ValueError("bad memory"),
+    ],
+)
+def test_transient_memory_probe_recovers(tmp_path: Path, failure: Exception) -> None:
+    probes = 0
+
+    def probe(_paths: dict[str, Path]) -> MemorySample:
+        nonlocal probes
+        probes += 1
+        if probes == 1:
+            raise failure
+        return MemorySample(0, 8192)
+
+    def execute(_run: ResolvedRun, _out: Path) -> ExecResult:
+        assert probes >= 2
+        return ExecResult(cases=1, expected=1)
+
+    ledger = run_matrix(
+        _spec(panel=["t"], arms=[Arm(name="a")], repeat=1),
+        tmp_path,
+        execute=execute,
+        revision="r",
+        memory_policy=MemoryPolicy(poll_seconds=0.001),
+        memory_probe=probe,
+    )
+    assert ledger.runs["a__t__r1"].status == "completed"
+    assert "memory_probe_error" in ledger.scheduler_history[-1]
+
+
 def test_memory_probe_failure_never_launches_work(tmp_path: Path) -> None:
     calls: list[str] = []
 

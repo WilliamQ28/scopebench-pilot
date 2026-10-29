@@ -4,6 +4,8 @@
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -23,6 +25,18 @@ from scopebench.matrix import (
 )
 from scopebench.memory import MemoryPolicy
 from scopebench.warmup import WarmupTimeoutError
+
+
+def prepare_uv() -> None:
+    """Find uv even when a noninteractive WSL launch omits the user bin directory."""
+    if shutil.which("uv") is None:
+        user_bin = Path.home() / ".local" / "bin"
+        candidate = user_bin / "uv"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            os.environ["PATH"] = str(user_bin) + os.pathsep + os.environ.get("PATH", "")
+        else:
+            raise RuntimeError("uv is required: install it or add its directory to PATH")
+    subprocess.run(["uv", "--version"], check=True, capture_output=True)  # noqa: S607
 
 
 def main() -> int:
@@ -47,6 +61,7 @@ def main() -> int:
                 break
             time.sleep(5)
     load_dotenv(override=False)
+    prepare_uv()
     out = Path("experiments/judge-information-full-suite-20261022")
     old_ledger = out / "ledger.json"
     revision = None
