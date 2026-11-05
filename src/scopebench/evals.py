@@ -396,6 +396,11 @@ def make_task_fn(
         if result.tools:
             set_eval_attribute("tools", result.tools)  # effective tool availability for the run
         set_eval_attribute("scopejudge", result.scopejudge)
+        set_eval_attribute("judge_backend", result.judge_backend)
+        set_eval_attribute("judge_transcript_strategy", result.judge_transcript_strategy)
+        set_eval_attribute("judge_history_format", result.judge_history_format)
+        set_eval_attribute("actor_max_output_tokens", result.actor_max_output_tokens)
+        set_eval_attribute("trim_reasoning_keep_recent", result.trim_reasoning_keep_recent)
         set_eval_attribute("attacker_brief", result.attacker_brief_id)
         set_eval_attribute("deny_feedback", result.deny_feedback)
         set_eval_attribute("brief_hidden", result.brief_hidden)

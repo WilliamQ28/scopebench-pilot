@@ -40,7 +40,12 @@ from scopebench.manifest import load_manifest
 from scopebench.memory import MemoryPolicy, MemorySample, sample_memory
 from scopebench.runner import RunOptions
 from scopebench.warmup import Endpoint, Probe, http_probe, served_name, warm_up
-from scopejudge.protocol import DenyFeedback
+from scopejudge.protocol import (
+    DenyFeedback,
+    JudgeBackend,
+    JudgeHistoryFormat,
+    JudgeTranscriptStrategy,
+)
 
 
 class MatrixMismatchError(RuntimeError):
@@ -56,6 +61,9 @@ class ArmSettings(BaseModel):
     base_url: str | None = None
     judge_model: str | None = None
     judge_base_url: str | None = None
+    judge_backend: JudgeBackend | None = None
+    judge_transcript_strategy: JudgeTranscriptStrategy | None = None
+    judge_history_format: JudgeHistoryFormat | None = None
     judge_timeout: float | None = None
     scopejudge: bool | None = None
     trajectory_judge: bool | None = None  # post-hoc Anthropic judge; off = qwen-only, no key needed
@@ -66,6 +74,7 @@ class ArmSettings(BaseModel):
     persist: bool | None = None
     max_nudges: int | None = None
     request_limit: int | None = None
+    actor_max_output_tokens: int | None = Field(default=None, gt=0)
     timeout: float | None = None
     max_tool_result_chars: int | None = None
     hide_actor_reasoning_from_judge: bool | None = None
@@ -143,6 +152,12 @@ def resolve_options(spec: MatrixSpec, arm: Arm) -> tuple[RunOptions, dict[str, o
         options.model = merged.model
     if merged.base_url is not None:
         options.base_url = merged.base_url
+    if merged.judge_backend is not None:
+        options.judge_backend = merged.judge_backend
+    if merged.judge_transcript_strategy is not None:
+        options.judge_transcript_strategy = merged.judge_transcript_strategy
+    if merged.judge_history_format is not None:
+        options.judge_history_format = merged.judge_history_format
     if merged.judge_model is not None:
         options.judge_model = merged.judge_model
     if merged.judge_base_url is not None:
@@ -163,6 +178,8 @@ def resolve_options(spec: MatrixSpec, arm: Arm) -> tuple[RunOptions, dict[str, o
         options.max_nudges = merged.max_nudges
     if merged.request_limit is not None:
         options.request_limit = merged.request_limit
+    if merged.actor_max_output_tokens is not None:
+        options.actor_max_output_tokens = merged.actor_max_output_tokens
     if merged.timeout is not None:
         options.timeout = merged.timeout
     if merged.max_tool_result_chars is not None:
@@ -197,6 +214,9 @@ def _effective_config(options: RunOptions) -> dict[str, object]:
         "model": options.model,
         "base_url": options.base_url,
         "judge_model": options.judge_model,
+        "judge_backend": options.judge_backend,
+        "judge_transcript_strategy": options.judge_transcript_strategy,
+        "judge_history_format": options.judge_history_format,
         "judge_base_url": options.judge_base_url,
         "judge_timeout": options.judge_timeout,
         "scopejudge": options.scopejudge,
@@ -206,6 +226,7 @@ def _effective_config(options: RunOptions) -> dict[str, object]:
         "persist": options.persist,
         "max_nudges": options.max_nudges,
         "request_limit": options.request_limit,
+        "actor_max_output_tokens": options.actor_max_output_tokens,
         "timeout": options.timeout,
         "max_tool_result_chars": options.max_tool_result_chars,
         "trim_reasoning_keep_recent": options.trim_reasoning_keep_recent,
@@ -519,7 +540,7 @@ def run_matrix(
                         session["waiting_for_memory"] = True
                         ledger.save()
                     print(f"Memory probe failed; admissions paused, retrying: {exc}", flush=True)
-                    threading.Event().wait(policy.poll_seconds)
+                    _ = threading.Event().wait(policy.poll_seconds)
                     continue
                 policy.observe(sample, active)
                 for run in list(pending):

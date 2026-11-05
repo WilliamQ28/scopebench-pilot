@@ -17,6 +17,9 @@ dataset on Hugging Face.
 For the active research run, start with the [experiment state and researcher onboarding report](EXPERIMENT_STATE.md). It covers progress, evidence limits, operating procedures, and next work.
 
 Check the active run without changing it: `.venv/bin/python check_run.py` (or double-click `Check Run.bat` on Windows). Add `--watch 60` for periodic updates.
+The checker follows the newest live experiment controller, or clearly shows the latest updated
+experiment when none is active. Use `--ledger PATH` to pin a specific run; watch mode rechecks
+which experiment is active on every refresh.
 
 ## What is included
 
@@ -26,6 +29,7 @@ Check the active run without changing it: `.venv/bin/python check_run.py` (or do
 - the ScopeBench runner and sandbox with research extensions
 - the full-trajectory agentic judge used to evaluate the casual-scope and program-brief variants
 - [live gate evidence and its limits](docs/scopebench/live-breach-evidence.md)
+- [the Dreadnode AgentJudge live gate](docs/scopebench/judge-backends.md)
 - [attacker behaviour ladder design](experiments/attacker-behavior-ladder.md) and
   [run script](experiments/run_ladder.sh)
 - [HTTP ScopeFirewall controls](docs/scopebench/scopefirewall-http.md), including a reusable

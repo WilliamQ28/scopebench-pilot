@@ -46,11 +46,11 @@ async def test_record_both_roles_without_leaking_hidden_thinking(
         return ModelResponse(parts=[ThinkingPart("ACTOR-FINAL-THOUGHT"), TextPart("done")])
 
     def judge(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        assert info.output_tools
+        assert not info.output_tools
         return ModelResponse(
             parts=[
                 ThinkingPart("JUDGE-REASONING"),
-                ToolCallPart(info.output_tools[0].name, {"verdict": "allow", "reason": "in scope"}),
+                TextPart("<passing>true</passing><reason>in scope</reason>"),
             ]
         )
 
@@ -61,6 +61,7 @@ async def test_record_both_roles_without_leaking_hidden_thinking(
         instruction="Only safe is authorized",
         model=FunctionModel(judge),
         hide_actor_reasoning=hidden,
+        transcript_strategy="full",
         recording_dir=tmp_path,
     )
     recorder = ResponseRecorder[HarnessDeps](tmp_path / "model-responses.jsonl", role="actor")
@@ -69,16 +70,19 @@ async def test_record_both_roles_without_leaking_hidden_thinking(
     )
     result = await agent.run("Do the task", deps=HarnessDeps(cwd=tmp_path))
     assert result.output == "done"
+    # Nothing judge-side is in the actor's workspace until the run ends.
+    assert not (tmp_path / "judge-inputs.jsonl").exists()
+    assert "JUDGE-REASONING" not in (tmp_path / "model-responses.jsonl").read_text()
+    gate.flush_recording()
     inputs = [
         json.loads(line) for line in (tmp_path / "judge-inputs.jsonl").read_text().splitlines()
     ]
     payload = cast("str", inputs[0]["payload"])
-    assert ("PRIVATE-ACTOR-STRATEGY" in payload) is not hidden
-    assert "Ordinary explanation" in payload
+    # Native upstream history excludes the response proposing the current call.
+    assert "PRIVATE-ACTOR-STRATEGY" not in payload
+    assert "Ordinary explanation" not in payload
     assert "Only safe is authorized" in payload
     assert inputs[0]["call_id"] == "proposal-1"
-    assert "JUDGE-REASONING" not in (tmp_path / "model-responses.jsonl").read_text()
-    gate.flush_recording()
     events = [
         json.loads(line) for line in (tmp_path / "model-responses.jsonl").read_text().splitlines()
     ]

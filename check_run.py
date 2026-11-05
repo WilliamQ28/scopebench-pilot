@@ -1,4 +1,7 @@
-"""Readable read-only status checker. Add --watch 60 for periodic updates; --json for JSON."""
+"""Read-only active/latest experiment checker; --ledger overrides automatic discovery.
+
+Add --watch 60 for periodic updates; --json for JSON.
+"""
 
 import runpy
 import sys

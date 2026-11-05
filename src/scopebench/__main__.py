@@ -50,7 +50,13 @@ from scopebench.evals import configure_logfire, report_to_json, run_evals
 from scopebench.manifest import TaskManifest, discover_tasks, load_manifest
 from scopebench.runner import AgentKind, RunOptions
 from scopejudge.compaction import MIN_RESULT_BUDGET
-from scopejudge.protocol import DenyFeedback, JudgeActorInformation
+from scopejudge.protocol import (
+    DenyFeedback,
+    JudgeActorInformation,
+    JudgeBackend,
+    JudgeHistoryFormat,
+    JudgeTranscriptStrategy,
+)
 
 
 def _default_tasks_dir() -> Path | None:
@@ -84,7 +90,12 @@ class _Args(argparse.Namespace):
     base_url: str | None = field(default_factory=lambda: os.environ.get("OPENAI_BASE_URL"))
     judge_model: str | None = None
     judge_base_url: str | None = None
+    judge_backend: JudgeBackend = "agentjudge"
+    judge_transcript_strategy: JudgeTranscriptStrategy = "intent_plus_calls"
+    judge_history_format: JudgeHistoryFormat = "raw"
     request_limit: int = 40
+    actor_max_output_tokens: int | None = None
+    trim_reasoning_keep_recent: int | None = None
     timeout: float = 600.0
     wait_timeout: int = 180
     keep_up: bool = False
@@ -190,6 +201,27 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     _ = parser.add_argument(
+        "--judge-backend",
+        choices=("agentjudge",),
+        help="Live gate implementation: pinned Dreadnode AgentJudge 2.0.53 core (default).",
+    )
+    _ = parser.add_argument(
+        "--judge-transcript-strategy",
+        choices=("rubric_only", "intent_only", "intent_plus_calls", "full"),
+        help=(
+            "Native AgentJudge transcript strategy (default: intent_plus_calls). "
+            "Overridden by --judge-actor-information."
+        ),
+    )
+    _ = parser.add_argument(
+        "--judge-history-format",
+        choices=("raw", "compact"),
+        help=(
+            "Actor-history serialization in the judge input: raw PydanticAI dump (default), or "
+            "compact (same content, provider bookkeeping removed)."
+        ),
+    )
+    _ = parser.add_argument(
         "--judge-model",
         metavar="PROVIDER:MODEL",
         help=(
@@ -205,6 +237,20 @@ def _build_parser() -> argparse.ArgumentParser:
             "OpenAI-compatible endpoint for the judge when --judge-model is set. Not inherited "
             "from --base-url, so a different-provider judge is not misrouted to the actor endpoint."
         ),
+    )
+    _ = parser.add_argument(
+        "--actor-max-output-tokens",
+        type=int,
+        metavar="N",
+        help=(
+            "Actor-only completion-token cap, including reasoning (default: endpoint/model limit)."
+        ),
+    )
+    _ = parser.add_argument(
+        "--trim-reasoning-keep-recent",
+        type=int,
+        metavar="N",
+        help="Trim older actor reasoning; keep the latest N responses (default: off).",
     )
     _ = parser.add_argument(
         "--request-limit",
@@ -255,7 +301,10 @@ def _build_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--judge-actor-information",
         choices=["none", "justification", "full"],
-        help="Actor commentary shown alongside common tool evidence (unset: legacy history).",
+        help=(
+            "Explicit information mode: full history or current justification "
+            "alongside common tool evidence (unset: native AgentJudge history)."
+        ),
     )
     _ = parser.add_argument(
         "--hide-actor-reasoning-from-judge",
@@ -502,6 +551,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
+    if args.actor_max_output_tokens is not None and args.actor_max_output_tokens < 1:
+        print("error: --actor-max-output-tokens must be positive.", file=sys.stderr)
+        return 2
+    if args.trim_reasoning_keep_recent is not None and args.trim_reasoning_keep_recent < 0:
+        print("error: --trim-reasoning-keep-recent must be nonnegative.", file=sys.stderr)
+        return 2
+
     if args.concurrency > 1 and args.agent != "harness":
         print(
             f"warning: --concurrency {args.concurrency} is ignored for --agent {args.agent}; "
@@ -548,7 +604,12 @@ def main(argv: list[str] | None = None) -> int:
         base_url=args.base_url,
         judge_model=args.judge_model,
         judge_base_url=args.judge_base_url,
+        judge_backend=args.judge_backend,
+        judge_transcript_strategy=args.judge_transcript_strategy,
+        judge_history_format=args.judge_history_format,
         request_limit=args.request_limit,
+        actor_max_output_tokens=args.actor_max_output_tokens,
+        trim_reasoning_keep_recent=args.trim_reasoning_keep_recent,
         timeout=args.timeout,
         wait_timeout=args.wait_timeout,
         keep_up=args.keep_up,

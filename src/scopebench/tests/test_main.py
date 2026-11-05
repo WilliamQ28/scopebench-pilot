@@ -526,9 +526,7 @@ def test_main_deny_feedback_threads_into_options(
     assert seen == [("white", 120.0)]
 
 
-def test_main_persist_threads_into_options(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_main_persist_threads_into_options(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def no_logfire(*_args: object) -> None:
         pass
 
@@ -565,10 +563,18 @@ def test_main_judge_model_threads_into_options(
     monkeypatch.setattr(cli, "ensure_image", lambda: "img")
     monkeypatch.setattr(cli, "configure_logfire", no_logfire)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    seen: list[tuple[object, object]] = []
+    seen: list[tuple[object, object, object, object, object]] = []
 
     async def fake_run_evals(_manifests: object, options: RunOptions, **_kw: object) -> _FakeReport:
-        seen.append((options.judge_model, options.judge_base_url))
+        seen.append(
+            (
+                options.judge_model,
+                options.judge_base_url,
+                options.judge_backend,
+                options.judge_transcript_strategy,
+                options.judge_history_format,
+            )
+        )
         return _FakeReport()
 
     monkeypatch.setattr(cli, "run_evals", fake_run_evals)
@@ -579,18 +585,22 @@ def test_main_judge_model_threads_into_options(
         "--agent",
         "harness",
         "--scopejudge",
+        "--judge-backend",
+        "agentjudge",
+        "--judge-transcript-strategy",
+        "intent_only",
         "--judge-model",
         "anthropic:claude-x",
         "--judge-base-url",
         "http://j",
+        "--judge-history-format",
+        "compact",
     ]
     assert main(argv) == 0
-    assert seen == [("anthropic:claude-x", "http://j")]
+    assert seen == [("anthropic:claude-x", "http://j", "agentjudge", "intent_only", "compact")]
 
 
-def test_main_tools_threads_into_options(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_main_tools_threads_into_options(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def no_logfire(*_args: object) -> None:
         pass
 
@@ -793,3 +803,85 @@ def test_main_loads_dotenv_from_current_directory(
 
 def _noop_dotenv(_root: Path) -> None:
     pass
+
+
+@pytest.mark.parametrize("mode", ["full", "justification"])
+def test_main_agentjudge_accepts_shared_information(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(cli, "ensure_image", lambda: "img")
+    _mock_eval(monkeypatch)
+    seen: list[object] = []
+
+    async def fake_run_evals(_manifests: object, options: RunOptions, **_kw: object) -> _FakeReport:
+        seen.append((options.judge_backend, options.judge_actor_information))
+        return _FakeReport()
+
+    monkeypatch.setattr(cli, "run_evals", fake_run_evals)
+    assert (
+        main(
+            [
+                "--all",
+                "--tasks-dir",
+                str(_tasks_dir(tmp_path)),
+                "--scopejudge",
+                "--judge-backend",
+                "agentjudge",
+                "--judge-actor-information",
+                mode,
+            ]
+        )
+        == 0
+    )
+    assert seen == [("agentjudge", mode)]
+
+
+def test_main_actor_speed_controls_thread_into_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(cli, "ensure_image", lambda: "img")
+    _mock_eval(monkeypatch)
+    seen: list[object] = []
+
+    async def fake_run_evals(_manifests: object, options: RunOptions, **_kw: object) -> _FakeReport:
+        seen.append((options.actor_max_output_tokens, options.trim_reasoning_keep_recent))
+        return _FakeReport()
+
+    monkeypatch.setattr(cli, "run_evals", fake_run_evals)
+    assert (
+        main(
+            [
+                "--all",
+                "--tasks-dir",
+                str(_tasks_dir(tmp_path)),
+                "--actor-max-output-tokens",
+                "8192",
+                "--trim-reasoning-keep-recent",
+                "1",
+            ]
+        )
+        == 0
+    )
+    assert seen == [(8192, 1)]
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "error"),
+    [
+        ("--actor-max-output-tokens", "0", "must be positive"),
+        ("--trim-reasoning-keep-recent", "-1", "must be nonnegative"),
+    ],
+)
+def test_main_invalid_actor_speed_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+    value: str,
+    error: str,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    assert main(["--all", "--tasks-dir", str(_tasks_dir(tmp_path)), flag, value]) == 2
+    assert error in capsys.readouterr().err

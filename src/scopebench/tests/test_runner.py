@@ -274,18 +274,26 @@ def test_run_task_harness_forwards_trim_reasoning_keep_recent(
     seen: list[object] = []
 
     def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
-        seen.append(config.get("trim_reasoning_keep_recent"))
+        seen.append(
+            (config.get("trim_reasoning_keep_recent"), config.get("actor_max_output_tokens"))
+        )
         assert "judge_actor_information" in config
         assert config.get("record_reasoning") is True
         return AgentResult(output="ok")
 
     monkeypatch.setattr(runner, "run_agent_container", fake_run)
     manifest = load_manifest(_task(tmp_path))
-    _ = run_task(manifest, RunOptions(agent="harness", trim_reasoning_keep_recent=3), "sb-trim")
+    trimmed = run_task(
+        manifest,
+        RunOptions(agent="harness", trim_reasoning_keep_recent=3, actor_max_output_tokens=8192),
+        "sb-trim",
+    )
+    assert trimmed.actor_max_output_tokens == 8192
+    assert trimmed.trim_reasoning_keep_recent == 3
     _ = run_task(manifest, RunOptions(agent="harness", trim_reasoning_keep_recent=0), "sb-zero")
     _ = run_task(manifest, RunOptions(agent="harness"), "sb-off")
     # Rides the config whenever set (0 is a real setting: strip all); absent when None.
-    assert seen == [3, 0, None]
+    assert seen == [(3, 8192), (0, None), (None, None)]
 
 
 def test_run_task_harness_forwards_persistence(
@@ -308,6 +316,31 @@ def test_run_task_harness_forwards_persistence(
     assert seen == [(True, 7), (True, None), (None, None)]
 
 
+def test_run_task_harness_sends_judge_history_format_only_when_compact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _mock_stack(monkeypatch)
+    monkeypatch.setattr(runner, "ensure_image", lambda: "img:tag")
+    seen: list[object] = []
+
+    def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
+        seen.append(config.get("judge_history_format", "absent"))
+        return AgentResult(output="ok")
+
+    monkeypatch.setattr(runner, "run_agent_container", fake_run)
+    manifest = load_manifest(_task(tmp_path))
+    compact = run_task(
+        manifest,
+        RunOptions(agent="harness", scopejudge=True, judge_history_format="compact"),
+        "sb-compact",
+    )
+    raw = run_task(manifest, RunOptions(agent="harness", scopejudge=True), "sb-raw")
+    # Raw configs stay byte-identical on the wire; the format is recorded either way.
+    assert seen == ["compact", "absent"]
+    assert compact.judge_history_format == "compact"
+    assert raw.judge_history_format == "raw"
+
+
 def test_run_task_harness_forwards_and_records_judge_model(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -317,6 +350,8 @@ def test_run_task_harness_forwards_and_records_judge_model(
     seen: list[tuple[object, object, object]] = []
 
     def fake_run(*, config: AgentConfig, **_kwargs: object) -> AgentResult:
+        assert config.get("judge_backend") == "agentjudge"
+        assert config.get("judge_transcript_strategy") == "intent_plus_calls"
         seen.append(
             (config.get("judge_model"), config.get("judge_api_key"), config.get("judge_base_url"))
         )
@@ -329,6 +364,7 @@ def test_run_task_harness_forwards_and_records_judge_model(
         RunOptions(
             agent="harness",
             scopejudge=True,
+            judge_backend="agentjudge",
             judge_model="anthropic:claude-x",
             judge_base_url="http://j",
         ),
@@ -347,6 +383,8 @@ def test_run_task_harness_forwards_and_records_judge_model(
         ("openai:gpt-4o", None, None),  # resolved model rides; absent key/base_url omitted
         (None, None, None),  # no override: judge shares the actor config
     ]
+    assert judged.judge_backend == "agentjudge"
+    assert fallback.judge_backend == "agentjudge"
     assert judged.judge_model == "anthropic:claude-x"  # recorded for provenance
     assert judged.model_requests == 7  # model-request count recorded, distinct from tool_calls
     assert nokey.judge_model == "openai:gpt-4o"

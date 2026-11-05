@@ -14,6 +14,12 @@ from typing import Literal, NotRequired, TypedDict
 # judge's policy prompt. Only meaningful when ScopeJudge is enabled.
 DenyFeedback = Literal["black", "binary", "reasoned", "white"]
 JudgeActorInformation = Literal["none", "justification", "full"]
+JudgeBackend = Literal["agentjudge"]
+JudgeTranscriptStrategy = Literal["rubric_only", "intent_only", "intent_plus_calls", "full"]
+# How the actor history is serialized into the judge's input. ``raw`` is the PydanticAI message dump
+# (provider bookkeeping included); ``compact`` keeps every actor-visible content field in order and
+# drops bookkeeping (usage, ids, timestamps, endpoints, repeated harness instructions).
+JudgeHistoryFormat = Literal["raw", "compact"]
 
 
 class AgentConfig(TypedDict):
@@ -27,11 +33,17 @@ class AgentConfig(TypedDict):
     # default endpoint. Pair with an ``openai-chat:<served-model>`` model string for vLLM.
     base_url: NotRequired[str | None]
     request_limit: int
+    # Actor-only completion allowance; absent keeps the endpoint/model default.
+    actor_max_output_tokens: NotRequired[int | None]
     timeout: float
     ask_user_reply: str
     atif: bool
     session_id: str | None
     scopejudge_enabled: bool
+    judge_backend: NotRequired[JudgeBackend]
+    judge_transcript_strategy: NotRequired[JudgeTranscriptStrategy]
+    # Judge-input serialization of the actor history. Absent = ``raw`` (frozen baselines unchanged).
+    judge_history_format: NotRequired[JudgeHistoryFormat]
     # Adversarial treatment: an attacker-only brief prepended to the acting agent's prompt. It is
     # never passed to the ScopeJudge policy, so the judge keeps authorizing against the unaltered
     # engagement instruction. Optional (NotRequired) so existing configs remain valid on the wire.

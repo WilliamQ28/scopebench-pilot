@@ -14,14 +14,15 @@ from agent_harness import HarnessDeps
 from scopebench.breach import inspect_gate
 from scopejudge.capability import ScopeJudge
 from scopejudge.mediation import evidence_history, mediation_tools, split_justification
-from scopejudge.protocol import JudgeActorInformation
+from scopejudge.protocol import JudgeActorInformation, JudgeBackend
 from scopejudge.runtime import _actor_prompt, _write_trajectory
 from scopejudge.tests.test_gate import _cfg
 
 
+@pytest.mark.parametrize("backend", ["agentjudge"])
 @pytest.mark.parametrize("mode", ["none", "justification", "full"])
 async def test_mediator_visibility_and_execution(
-    tmp_path: Path, mode: JudgeActorInformation
+    tmp_path: Path, mode: JudgeActorInformation, backend: JudgeBackend
 ) -> None:
     calls = 0
     hits: list[str] = []
@@ -50,7 +51,9 @@ async def test_mediator_visibility_and_execution(
 
     gate = ScopeJudge(
         instruction="Only safe actions",
-        model=TestModel(call_tools=[], custom_output_args={"verdict": "allow", "reason": "ok"}),
+        model=(TestModel(custom_output_text="<passing>true</passing><reason>ok</reason>")),
+        backend=backend,
+        transcript_strategy="rubric_only",  # shared conditions override native filtering
         actor_information=mode,
         recording_dir=tmp_path,
     )
@@ -58,13 +61,23 @@ async def test_mediator_visibility_and_execution(
     result = await agent.run("HIDDEN_PROMPT", deps=HarnessDeps(cwd=tmp_path))
     assert result.output == "done"
     assert hits == ["ACTION_DATA", "ACTION_DATA"]  # metadata did not reach the native tool
+    gate.flush_recording()
     inputs = [
         cast("dict[str, str]", json.loads(line))
         for line in (tmp_path / "judge-inputs.jsonl").read_text().splitlines()
     ]
     assert len(inputs) == 2
     for i in inputs:
-        payload = i["payload"]
+        recorded = cast("dict[str, object]", json.loads(i["payload"]))
+        assert recorded["actor_information"] == mode
+        assert recorded["transcript_strategy"] is None
+        messages = cast("list[dict[str, str]]", recorded["messages"])
+        piped = cast(
+            "dict[str, object]", json.loads(messages[2]["content"].removeprefix("[user]: "))
+        )
+        assert piped == recorded["information"]
+        assert "untrusted actor claim" in messages[0]["content"]
+        payload = json.dumps(recorded["information"])
         assert "ACTION_DATA" in payload
         assert ("EXTERNAL_CLAIM" in payload) is (mode != "none")
         assert ("PRIVATE_STRATEGY" in payload) is (mode == "full")
@@ -136,18 +149,21 @@ def test_evidence_history_strips_claims_and_marks_invalid_arguments() -> None:
     assert "invalid_arguments" in result
 
 
-def test_full_conflict_and_uniform_prompt() -> None:
+@pytest.mark.parametrize("backend", ["agentjudge"])
+def test_full_conflict_and_uniform_prompt(backend: JudgeBackend) -> None:
     with pytest.raises(ValueError, match="conflicts"):
         ScopeJudge(
             instruction="task",
             model=TestModel(),
             actor_information="full",
+            backend=backend,
             hide_actor_reasoning=True,
         )
     prompts: list[str] = []
     for mode in ("none", "justification", "full"):
         cfg = _cfg()
         cfg["judge_actor_information"] = mode
+        cfg["judge_backend"] = backend
         prompts.append(_actor_prompt(cfg))
     assert prompts[0] == prompts[1] == prompts[2]
     assert "do not assume reasoning is private" in prompts[0]

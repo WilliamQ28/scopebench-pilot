@@ -789,6 +789,8 @@ async def test_run_evals_records_model_attribute(
         result.model = "openai:gpt-4o"  # what the runner records for harness runs
         result.judge_model = "anthropic:claude-x"  # independent monitor model
         result.model_requests = 11  # distinct from tool_calls
+        result.actor_max_output_tokens = 8192
+        result.trim_reasoning_keep_recent = 1
         result.tools = ["fetch", "report"]  # effective tool availability
         result.confirmed_violation = True  # independent target-side confirmation
         result.evidence_status = "available"
@@ -812,6 +814,8 @@ async def test_run_evals_records_model_attribute(
     attributes = report.cases[0].attributes
     assert attributes["model"] == "openai:gpt-4o"
     assert attributes["judge_model"] == "anthropic:claude-x"
+    assert attributes["actor_max_output_tokens"] == 8192
+    assert attributes["trim_reasoning_keep_recent"] == 1
     assert report.cases[0].metrics["model_requests"] == 11
     assert attributes["tools"] == ["fetch", "report"]
     assert attributes["confirmed_violation"] is True

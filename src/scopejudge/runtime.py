@@ -21,6 +21,7 @@ from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import UsageLimits, capture_run_messages
 from pydantic_ai.capabilities import ProcessHistory
 from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import RunUsage
 
 from agent_harness import (
@@ -110,8 +111,16 @@ def _build_judge_model(cfg: AgentConfig) -> Model:
     judge_model = cfg.get("judge_model")
     if not judge_model:
         return _build_model(cfg)
+    judge_base_url = cfg.get("judge_base_url")
+    if (
+        cfg.get("judge_backend", "agentjudge") == "agentjudge"
+        and judge_base_url is None
+        and judge_model.startswith("openai-chat:")
+        and (cfg["model"] or "").startswith("openai-chat:")
+    ):
+        judge_base_url = cfg.get("base_url")
     return _build_model_from(
-        judge_model, cfg.get("judge_base_url"), cfg.get("judge_api_key") or cfg["api_key"]
+        judge_model, judge_base_url, cfg.get("judge_api_key") or cfg["api_key"]
     )
 
 
@@ -175,6 +184,9 @@ def _capabilities(cfg: AgentConfig, cwd: Path) -> tuple[AbstractCapability[Harne
         capabilities.append(
             ScopeJudge(
                 instruction=cfg["instruction"],
+                backend=cfg.get("judge_backend", "agentjudge"),
+                transcript_strategy=cfg.get("judge_transcript_strategy", "intent_plus_calls"),
+                history_format=cfg.get("judge_history_format", "raw"),
                 model=_build_judge_model(cfg),
                 timeout=cfg.get("judge_timeout") or 30.0,
                 feedback=cfg.get("deny_feedback") or "reasoned",
@@ -243,6 +255,14 @@ async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _Ru
     :func:`_objective_reached`), so persistence leaks no grading signal into the trajectory.
     """
     request_limit = cfg["request_limit"]
+    actor_max_output_tokens = cfg.get("actor_max_output_tokens")
+    if actor_max_output_tokens is not None and actor_max_output_tokens < 1:
+        raise ValueError("actor_max_output_tokens must be positive")
+    actor_settings = (
+        ModelSettings(max_tokens=actor_max_output_tokens)
+        if actor_max_output_tokens is not None
+        else None
+    )
     usage = RunUsage()
     usage_limits = UsageLimits(request_limit=request_limit)
     reply = cfg["ask_user_reply"]
@@ -267,6 +287,7 @@ async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _Ru
                     usage=usage,
                     usage_limits=usage_limits,
                     model=model,
+                    model_settings=actor_settings,
                     capabilities=capabilities,
                 )
             while True:
@@ -284,6 +305,7 @@ async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _Ru
                             usage=usage,
                             usage_limits=usage_limits,
                             model=model,
+                            model_settings=actor_settings,
                             capabilities=capabilities,
                         )
                     continue
@@ -303,6 +325,7 @@ async def run_agent(cfg: AgentConfig, *, model: Model, deps: HarnessDeps) -> _Ru
                             usage=usage,
                             usage_limits=usage_limits,
                             model=model,
+                            model_settings=actor_settings,
                             capabilities=capabilities,
                         )
                     continue

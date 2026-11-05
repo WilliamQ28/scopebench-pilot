@@ -39,7 +39,13 @@ from scopebench.manifest import (
     RunTokenVerification,
     TaskManifest,
 )
-from scopejudge.protocol import DenyFeedback, JudgeActorInformation
+from scopejudge.protocol import (
+    DenyFeedback,
+    JudgeActorInformation,
+    JudgeBackend,
+    JudgeHistoryFormat,
+    JudgeTranscriptStrategy,
+)
 
 AgentKind = Literal["harness", "solution", "dry-run"]
 
@@ -75,7 +81,12 @@ class TaskResult:
     model_requests: int = 0
     # Effective tool availability for this run (names from the selected toolset groups).
     tools: list[str] = field(default_factory=list)
+    judge_backend: JudgeBackend = "agentjudge"
+    judge_transcript_strategy: JudgeTranscriptStrategy = "intent_plus_calls"
+    judge_history_format: JudgeHistoryFormat = "raw"
     scopejudge: bool = False
+    actor_max_output_tokens: int | None = None
+    trim_reasoning_keep_recent: int | None = None
     attacker_brief_id: str = "none"
     deny_feedback: DenyFeedback = "reasoned"
     brief_hidden: bool = False
@@ -112,6 +123,12 @@ class RunOptions:
     # base_url when judge_model is set, so a different-provider judge is not misrouted.
     judge_model: str | None = None
     judge_base_url: str | None = None
+    judge_backend: JudgeBackend = "agentjudge"
+    judge_transcript_strategy: JudgeTranscriptStrategy = "intent_plus_calls"
+    # Judge-input serialization of the actor history; "compact" drops provider bookkeeping only.
+    judge_history_format: JudgeHistoryFormat = "raw"
+    # Bound actor completions without changing the judge's independent allowance.
+    actor_max_output_tokens: int | None = None
     # Max MODEL REQUESTS per run (not tool calls: one request can emit several tool calls).
     request_limit: int = 40
     timeout: float = 600.0
@@ -299,7 +316,12 @@ def run_task(
                 instruction_id=selected_instruction.id,
                 model=agent_outcome.model,
                 judge_model=agent_outcome.judge_model,
+                judge_backend=options.judge_backend,
+                judge_transcript_strategy=options.judge_transcript_strategy,
+                judge_history_format=options.judge_history_format,
                 model_requests=agent_outcome.model_requests,
+                actor_max_output_tokens=options.actor_max_output_tokens,
+                trim_reasoning_keep_recent=options.trim_reasoning_keep_recent,
                 tools=agent_outcome.tools,
                 scopejudge=options.scopejudge and options.agent == "harness",
                 attacker_brief_id=(
@@ -417,9 +439,13 @@ def _run_harness_container(
         "atif": capture_trajectory,
         "session_id": compose_stack.project,
         "scopejudge_enabled": options.scopejudge,
+        "judge_backend": options.judge_backend,
+        "judge_transcript_strategy": options.judge_transcript_strategy,
     }
     if options.base_url is not None:
         config["base_url"] = options.base_url
+    if options.actor_max_output_tokens is not None:
+        config["actor_max_output_tokens"] = options.actor_max_output_tokens
     effective_judge_model = effective_model
     if options.judge_model:
         effective_judge_model = models.resolve_model(options.judge_model)
@@ -439,6 +465,9 @@ def _run_harness_container(
         config["judge_timeout"] = options.judge_timeout
     if options.max_tool_result_chars:
         config["max_tool_result_chars"] = options.max_tool_result_chars
+    if options.judge_history_format != "raw":
+        # Sent only when non-default, so raw-format configs stay byte-identical on the wire.
+        config["judge_history_format"] = options.judge_history_format
     config["hide_actor_reasoning_from_judge"] = options.hide_actor_reasoning_from_judge
     config["record_reasoning"] = options.record_reasoning
     config["judge_actor_information"] = options.judge_actor_information

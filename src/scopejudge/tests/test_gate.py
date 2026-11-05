@@ -16,9 +16,9 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.settings import ModelSettings
 
 from agent_harness import HarnessDeps
+from scopejudge.agentjudge import policy_prompt
 from scopejudge.capability import (
     _JUDGE_MAX_OUTPUT_TOKENS,
-    _JUDGE_PROMPT,
     GateRecord,
     ScopeDecision,
     ScopeJudge,
@@ -43,9 +43,10 @@ def actor(calls: list[ToolCallPart]) -> FunctionModel:
 
 
 def gate(verdict: str) -> ScopeJudge:
+    passing = "ask" if verdict == "uncertain" else "true" if verdict == "allow" else "false"
     return ScopeJudge(
         instruction="Only authorized actions are permitted.",
-        model=TestModel(call_tools=[], custom_output_args={"verdict": verdict, "reason": "policy"}),
+        model=TestModel(custom_output_text=f"<passing>{passing}</passing><reason>policy</reason>"),
     )
 
 
@@ -243,7 +244,7 @@ def test_deny_message_feedback_levels() -> None:
     assert reasoned == "ScopeJudge blocked this call (deny): because policy"
     white = judge("white")._deny_message(decision)
     assert white.startswith(reasoned)
-    assert _JUDGE_PROMPT in white  # white-box discloses the judge's own policy
+    assert policy_prompt("i") in white  # white-box discloses the judge's own policy
 
 
 def test_strip_text_redacts_nested_strings() -> None:
@@ -271,9 +272,9 @@ async def test_judge_hides_brief_from_trajectory_when_enabled(
         )
         seen: dict[str, str] = {}
 
-        async def fake_run(payload: str, **_kw: object) -> SimpleNamespace:
-            seen["payload"] = payload
-            return SimpleNamespace(output=ScopeDecision(verdict="deny", reason="p"))
+        async def fake_run(**kwargs: object) -> SimpleNamespace:
+            seen["payload"] = str(kwargs["message_history"])
+            return SimpleNamespace(output="<passing>false</passing><reason>p</reason>")
 
         monkeypatch.setattr(capability.judge, "run", fake_run)
         agent = Agent(

@@ -169,6 +169,7 @@ def test_resolve_options_maps_every_field(tmp_path: Path) -> None:
                     "persist": True,
                     "max_nudges": 3,
                     "request_limit": 99,
+                    "actor_max_output_tokens": 8192,
                     "timeout": 123.0,
                     "max_tool_result_chars": 8000,
                     "trim_reasoning_keep_recent": 5,
@@ -194,6 +195,8 @@ def test_resolve_options_maps_every_field(tmp_path: Path) -> None:
     assert o.persist is True
     assert o.max_nudges == 3
     assert o.request_limit == 99
+    assert o.actor_max_output_tokens == 8192
+    assert cfg["actor_max_output_tokens"] == 8192
     assert o.timeout == 123.0
     assert o.max_tool_result_chars == 8000
     assert o.hide_actor_reasoning_from_judge is True
@@ -973,3 +976,46 @@ def test_live_slots_can_grow_then_reduce_without_killing(tmp_path: Path, slots: 
     assert peak == slots
     assert started == slots + 2
     assert all(r.status == "completed" for r in ledger.runs.values())
+
+
+def test_agentjudge_backend_resolves_and_records_conditions() -> None:
+    spec = MatrixSpec.model_validate(
+        {
+            "name": "backends",
+            "panel": ["t"],
+            "defaults": {"judge_backend": "agentjudge", "scopejudge": True},
+            "arms": [
+                {
+                    "name": "official",
+                    "judge_backend": "agentjudge",
+                    "judge_transcript_strategy": "full",
+                }
+            ],
+        }
+    )
+    options, recorded = resolve_options(spec, spec.arms[0])
+    assert options.judge_backend == "agentjudge"
+    assert options.judge_transcript_strategy == "full"
+    assert recorded["judge_backend"] == "agentjudge"
+    assert recorded["judge_transcript_strategy"] == "full"
+    assert options.judge_history_format == "raw"  # default when the matrix does not set it
+    assert recorded["judge_history_format"] == "raw"
+    spec.defaults.judge_history_format = "compact"
+    options, recorded = resolve_options(spec, spec.arms[0])
+    assert options.judge_history_format == "compact"
+    assert recorded["judge_history_format"] == "compact"
+    spec.defaults.judge_actor_information = "justification"
+    options, recorded = resolve_options(spec, spec.arms[0])
+    assert options.judge_actor_information == "justification"
+    assert recorded["judge_actor_information"] == "justification"
+
+
+def test_matrix_rejects_invalid_actor_output_budget() -> None:
+    with pytest.raises(ValueError, match="greater than 0"):
+        MatrixSpec.model_validate(
+            {
+                "name": "invalid",
+                "panel": ["t"],
+                "arms": [{"name": "a", "actor_max_output_tokens": 0}],
+            }
+        )
